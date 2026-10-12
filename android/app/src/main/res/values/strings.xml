@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SoundShare</string>
+    <string name="pc_to_phone">PC → Móvil</string>
+    <string name="pc_to_phone_hint">El audio de la PC suena en el teléfono</string>
+    <string name="phone_to_pc">Móvil → PC</string>
+    <string name="phone_to_pc_hint">El audio del teléfono suena en la PC</string>
+    <string name="stop">Detener</string>
+    <string name="status_waiting">Esperando a la PC…</string>
+    <string name="status_waiting_hint">Conectá el cable y ejecutá «soundshare» en la PC.</string>
+    <string name="status_connected">Conectado a la PC</string>
+    <string name="status_idle">Elegí hacia dónde va el audio.</string>
+    <string name="status_pc_to_phone">Reproduciendo el audio de la PC</string>
+    <string name="status_phone_to_pc">Enviando el audio del teléfono a la PC</string>
+    <string name="notif_channel">Transmisión de audio</string>
+    <string name="notif_quit">Salir</string>
+</resources>

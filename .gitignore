@@ -1,0 +1,29 @@
+# Rust: conservar Cargo.lock, ignorar artefactos.
+/pc/target/
+
+# Android / Gradle: conservar el wrapper y su JAR.
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
+.kotlin/
+.cxx/
+.externalNativeBuild/
+
+# IDEs y archivos locales.
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Resultados y claves locales.
+*.apk
+*.aab
+*.jks
+*.keystore
+*.hprof
+*.log

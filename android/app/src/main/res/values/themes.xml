@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#FF101318</color>
+    <color name="surface">#FF1B2028</color>
+    <color name="accent">#FF4FC3F7</color>
+    <color name="accent_dim">#FF23394A</color>
+    <color name="text">#FFE8EAED</color>
+    <color name="text_dim">#FF9AA0A6</color>
+    <color name="ok">#FF81C995</color>
+    <color name="warn">#FFFDD663</color>
+
+    <style name="Theme.SoundShare" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:textColorPrimary">@color/text</item>
+        <item name="android:textColorSecondary">@color/text_dim</item>
+    </style>
+</resources>

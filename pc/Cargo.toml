@@ -1,0 +1,13 @@
+[package]
+name = "soundshare"
+version = "0.1.0"
+edition = "2024"
+description = "Comparte audio entre la PC (Linux/PipeWire) y un teléfono Android por cable USB"
+
+[dependencies]
+libc = "0.2.190"
+pipewire = { version = "0.10.1", features = ["v1_2_0"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
