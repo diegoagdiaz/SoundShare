@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+app_dir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)"
+export LD_LIBRARY_PATH="$app_dir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export PATH="$app_dir/usr/bin:$PATH"
+export ADB="${ADB:-$app_dir/usr/bin/adb}"
+export PIPEWIRE_MODULE_DIR="$app_dir/usr/lib/pipewire-0.3"
+export SPA_PLUGIN_DIR="$app_dir/usr/lib/spa-0.2"
+# Use a matching client config so host plugins aren't loaded into our client.
+export PIPEWIRE_CONFIG_DIR="$app_dir/usr/share/pipewire"
+export PIPEWIRE_CONFIG_NAME=client.conf
+
+exec "$app_dir/usr/bin/soundshare" "$@"

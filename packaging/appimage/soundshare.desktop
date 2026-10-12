@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=SoundShare
+Comment=Audio entre Linux y Android por USB
+Exec=soundshare
+Icon=soundshare
+Terminal=true
+Categories=AudioVideo;Audio;
