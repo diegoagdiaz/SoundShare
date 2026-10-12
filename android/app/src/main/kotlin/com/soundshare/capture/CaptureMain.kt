@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Build
 import android.os.Looper
 import android.os.Process
 import com.soundshare.Protocol
@@ -134,21 +135,22 @@ object CaptureMain {
      */
     @SuppressLint("MissingPermission")
     private fun openRecorder(): AudioRecord {
-        runCatching { newRecorder() }
-            .onFailure { log("no se pudo crear el grabador: $it") }
-            .getOrNull()?.let { if (start(it)) return it else it.release() }
+        try {
+            return createAndStartRecorder()
+        } catch (e: Exception) {
+            // El recurso de la actividad visible solo corresponde a Android 11.
+            // Un fallo de inicialización en otra versión no se arregla mostrando HeapDumpActivity.
+            if (Build.VERSION.SDK_INT != Build.VERSION_CODES.R) throw e
+            log("no se pudo iniciar el grabador: $e")
+        }
 
         log("Android pide una actividad visible para grabar; abriendo una un instante")
         try {
             exec("am", "start", "-W", "-n", "${ShellIdentity.PACKAGE}/.HeapDumpActivity")
-            val rec = checkNotNull(newRecorder()) { "Android no permitió abrir REMOTE_SUBMIX" }
-            if (!start(rec)) {
-                rec.release()
-                error("Android no permitió capturar el audio")
-            }
-            return rec
+            return createAndStartRecorder()
         } finally {
-            Thread { closeShellTasks() }.start()
+            // Terminamos la limpieza antes de que main pueda llamar exitProcess tras un error.
+            closeShellTasks()
         }
     }
 
@@ -165,9 +167,17 @@ object CaptureMain {
         return null
     }
 
-    private fun start(rec: AudioRecord): Boolean {
-        runCatching { rec.startRecording() }
-        return rec.recordingState == AudioRecord.RECORDSTATE_RECORDING
+    @SuppressLint("MissingPermission")
+    private fun createAndStartRecorder(): AudioRecord {
+        val rec = checkNotNull(newRecorder()) { "Android no permitió abrir REMOTE_SUBMIX" }
+        try {
+            rec.startRecording()
+            check(rec.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "Android no permitió capturar el audio" }
+            return rec
+        } catch (e: Throwable) {
+            rec.release()
+            throw e
+        }
     }
 
     private fun closeShellTasks() {
@@ -182,7 +192,7 @@ object CaptureMain {
             tasks.isNotEmpty()
         }.getOrDefault(false)
         if (removed) return
-        // Android 12 eliminó «am stack»: tapamos la actividad del shell con nuestra app.
+        // Si el sistema no permite quitar la tarea, volvemos a nuestra app.
         val covered = runCatching {
             val result = exec("am", "start", "-n", "com.soundshare/.MainActivity")
             check(!result.contains("Error", ignoreCase = true))

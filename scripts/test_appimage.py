@@ -12,10 +12,12 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import unittest
 
 
 REPO = Path(__file__).resolve().parent.parent
+VERSION = tomllib.loads((REPO / "pc/Cargo.toml").read_text())["package"]["version"]
 APPIMAGE = Path(sys.argv.pop(1)).resolve() if len(sys.argv) > 1 else REPO / "dist/SoundShare-x86_64.AppImage"
 
 
@@ -51,7 +53,7 @@ elif args == ['shell', 'pm path com.soundshare']:
     def test_help_without_fuse(self):
         result = subprocess.run([str(APPIMAGE), "--appimage-extract-and-run", "--help"],
                                 cwd="/", capture_output=True, text=True, timeout=30, check=True)
-        self.assertIn("SoundShare 0.1.0", result.stdout)
+        self.assertIn(f"SoundShare {VERSION}", result.stdout)
 
     def test_bundled_adb_and_apk(self):
         env = dict(os.environ, LD_LIBRARY_PATH=str(self.app_dir / "usr/lib"))

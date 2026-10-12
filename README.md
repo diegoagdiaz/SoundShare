@@ -79,7 +79,7 @@ La PC escucha en `127.0.0.1:47100`. Todas las conexiones las abre el teléfono h
 - Rust ≥ 1.88, `pkg-config`, cabeceras de PipeWire ≥ 1.2 y clang/libclang para bindgen. En Fedora: `sudo dnf install pipewire-devel clang pkgconf-pkg-config`.
 - `adb` de Android SDK Platform-Tools.
 - Para la APK: JDK 17 o superior **con `javac`**, Android SDK con plataforma 36 (`compileSdk = 36`). El proyecto usa AGP 9.4.1 con Kotlin integrado y wrapper Gradle 9.8.0, sin AndroidX.
-- Teléfono: Android 8+ para PC → Móvil (`minSdk = 26`). Móvil → PC necesita Android 11+ y fue probado solo en Android 11; usa APIs internas cuya compatibilidad depende del sistema.
+- Teléfono: Android 8+ para PC → Móvil (`minSdk = 26`). Móvil → PC necesita Android 11+; se verificó la captura en Android 11 y Android 16 (LineageOS 23.2, Samsung SM-A217M). Usa APIs internas cuya compatibilidad depende del sistema.
 - Cable USB que permita datos y depuración USB autorizada en el teléfono.
 
 ## Compilar y generar el paquete
@@ -124,6 +124,8 @@ Para generar el **AppImage**, con una APK debug ya compilada y Podman o Docker d
 ```
 
 El script compila la PC y un cliente PipeWire 1.2.8 en un contenedor Debian 12 para mantener una base de glibc 2.36. Empaqueta adb, las bibliotecas y los plugins que se cargan dinámicamente, el APK y las licencias. Las fuentes de PipeWire, appimagetool y el runtime se descargan con checksums verificados. No instala herramientas en el sistema anfitrión. El resultado es `dist/SoundShare-x86_64.AppImage`; `dist/SHA256SUMS` incluye todos los paquetes presentes. Los archivos y la caché de compilación quedan en `dist/appimage-build/`.
+
+Para verificar el capturador en un teléfono conectado: `python3 scripts/test_capture.py --serial SERIAL`. Usa la APK debug ya compilada sin instalarla, cuenta PCM en memoria durante tres segundos y elimina el APK temporal y su túnel al terminar. Durante la prueba desvía el audio de medios del teléfono, sin cambiar su volumen ni guardar la grabación.
 
 Conectá y autorizá el teléfono, y ejecutá:
 
@@ -210,14 +212,14 @@ Móvil → PC tiene un objetivo promedio inicial de 26 ms; arranca al reunir ese
 - **Binario incompatible:** usá un paquete para tu distribución y arquitectura, o ejecutá `./soundshare` desde el código fuente para compilar en tu PC.
 - **El AppImage no monta con FUSE:** ejecutá `./SoundShare-x86_64.AppImage --appimage-extract-and-run`.
 - **Sin permisos USB:** el AppImage incluye adb, pero no puede modificar las reglas USB del sistema sin privilegios. Configurá las reglas udev de Android de tu distribución y volvé a conectar el teléfono; no ejecutes SoundShare con `sudo` porque necesita tu sesión de audio.
-- **Parpadeo al iniciar Móvil → PC:** cuando el sistema exige una actividad visible, el capturador abre un instante `com.android.shell/.HeapDumpActivity`. Intenta cerrar sus tareas con `am stack` en Android 11; si no está disponible, abre SoundShare para taparla, y usa Inicio como último recurso. Android 12+ tiene atribución explícita al shell, pero sigue pendiente probar la captura en un equipo de esa versión.
+- **Parpadeo al iniciar Móvil → PC en Android 11:** cuando el sistema exige una actividad visible, el capturador abre un instante `com.android.shell/.HeapDumpActivity` y completa su cierre antes de seguir o reportar un error. Si no puede quitar la tarea con `am stack`, abre SoundShare para taparla y usa Inicio como último recurso. En Android 12+ no abre esa actividad. Android 14+ necesita que el contexto del capturador identifique el dispositivo real al crear `AudioRecord`; las APK anteriores a esta corrección pueden mostrar un error de `Context.getDeviceId()` y dejar una ventana de volcado abierta. Actualizá el APK y cancelá esa ventana si quedó de una ejecución anterior.
 - **PC → Móvil sin sonido:** revisá que la salida por defecto sea **SoundShare → Móvil**, que la aplicación de la PC use esa salida y que el volumen del teléfono permita escuchar. Si faltan los metadatos de PipeWire, seleccioná el sink a mano.
 - **Falta PipeWire al compilar:** instalá `pipewire-devel` y clang/libclang; el script corta si `pkg-config` no encuentra `libpipewire-0.3`.
 - **Gradle no encuentra Java o el SDK:** apuntá `JAVA_HOME` a un JDK con `javac` ≥ 17 y configurá `ANDROID_HOME` o `android/local.properties` con la ruta del SDK y plataforma 36.
 
 ## Limitaciones y próximas ideas
 
-Actualmente necesita Linux/PipeWire, cable USB y depuración USB. No ofrece audio simultáneo en ambos sentidos, interfaz gráfica para la PC ni transporte Wi-Fi. Los formatos emitidos son fijos a 48 kHz estéreo. La latencia tiene el piso del hardware y del túnel adb; el buffer puede crecer con los cortes y los descartes pueden producir un salto audible. La captura usa APIs internas y solo está probada en Android 11.
+Actualmente necesita Linux/PipeWire, cable USB y depuración USB. No ofrece audio simultáneo en ambos sentidos, interfaz gráfica para la PC ni transporte Wi-Fi. Los formatos emitidos son fijos a 48 kHz estéreo. La latencia tiene el piso del hardware y del túnel adb; el buffer puede crecer con los cortes y los descartes pueden producir un salto audible. La captura usa APIs internas; se verificó en Android 11 y Android 16, sin garantizar todas las versiones ni las modificaciones de cada fabricante.
 
 Ideas para una **v2**, todavía no implementadas:
 

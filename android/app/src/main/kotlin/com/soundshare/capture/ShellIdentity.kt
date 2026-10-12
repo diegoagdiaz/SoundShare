@@ -22,6 +22,13 @@ object ShellIdentity {
         override fun getPackageName(): String = PACKAGE
         override fun getOpPackageName(): String = PACKAGE
         override fun getAttributionTag(): String? = null
+        override fun getApplicationContext(): Context = this
+
+        // Android 14+ consulta el dispositivo virtual al crear AudioRecord.
+        // Este capturador pertenece al teléfono real (id 0), no a un dispositivo virtual.
+        // No delegamos en ContextWrapper: un proceso de shell no tiene contexto base.
+        @TargetApi(34)
+        override fun getDeviceId(): Int = 0
     }
 
     // Android 12 pide atribución al crear AudioRecord; la base nula no puede proporcionarla.

@@ -35,7 +35,7 @@ Salir: q + Enter o Ctrl+C.
 
 Requiere Linux con PipeWire y bibliotecas compatibles con la PC que compiló el paquete.
 El nombre del archivo indica la distribución y arquitectura de compilación.
-Móvil → PC usa APIs internas de Android y fue probado en Android 11.
+Móvil → PC usa APIs internas de Android; captura verificada en Android 11 y Android 16.
 EOF
 os_id=linux
 os_version=''
