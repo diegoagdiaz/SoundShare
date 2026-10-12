@@ -47,4 +47,5 @@ fi
 archive="$root/dist/SoundShare-${os_id}${os_version}-$(uname -m).tar.gz"
 tar -czf "$archive" -C "$staging" SoundShare
 cp -- "$apk" "$root/dist/SoundShare.apk"
+(cd -- "$root/dist" && sha256sum "${archive##*/}" SoundShare.apk > SHA256SUMS)
 printf 'Paquete PC + Android: %s\nAPK para instalar en el teléfono: %s/dist/SoundShare.apk\n' "$archive" "$root"

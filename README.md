@@ -16,6 +16,8 @@ Medios Android → REMOTE_SUBMIX → USB/adb → PipeWire → salida de la PC
 
 ## Inicio rápido
 
+Descargá el [APK para Android](https://github.com/diegoagdiaz/SoundShare/releases/latest/download/SoundShare.apk) y el paquete para tu PC desde [GitHub Releases](https://github.com/diegoagdiaz/SoundShare/releases/latest). La primera versión incluye un paquete para **Fedora 44 x86_64**. Para otras distribuciones, podés compilar la PC desde el repositorio con el comando de inicio que se muestra abajo.
+
 En el teléfono, instalá **SoundShare.apk** y, la primera vez, activá **Depuración USB** en las opciones de desarrollador. Al conectar el cable, desbloqueá el teléfono y aceptá la autorización de la PC; podés marcar «Permitir siempre desde esta computadora».
 
 En una PC Linux con PipeWire, descomprimí el paquete `SoundShare-<distribución>-<arquitectura>.tar.gz` y ejecutá desde la carpeta **SoundShare**:
@@ -36,6 +38,14 @@ Si preferís preparar la PC antes de empezar, son dos comandos:
 La instalación automática de dependencias admite Fedora y Debian/Ubuntu y puede pedir tu contraseña de `sudo`. En otras distribuciones, instalá `adb`, PipeWire y WirePlumber con tu gestor de paquetes. PipeWire y WirePlumber deben estar activos en la sesión del usuario; el script no cambia ni reinicia la configuración de audio.
 
 **Desde este repositorio** también podés ejecutar `./soundshare`: prepara las herramientas y compila únicamente la PC en la primera ejecución. En ese caso necesitás cabeceras de PipeWire ≥ 1.2 y Rust ≥ 1.88; si falta Rust, el script instala la versión estable con el instalador oficial. La APK se instala por separado en el teléfono, sin compilar Android en la PC de uso.
+
+```bash
+git clone https://github.com/diegoagdiaz/SoundShare.git
+cd SoundShare
+./soundshare
+```
+
+No hace falta ejecutar `build.sh` ni `setup.sh` antes. En Fedora y Debian/Ubuntu, el inicio instala las dependencias faltantes; puede pedir `sudo`. Descargá el APK desde la release e instalalo en el teléfono. La primera compilación requiere conexión a Internet; las siguientes ejecuciones usan el ejecutable ya compilado.
 
 Para arrancar directamente en un sentido:
 
@@ -90,7 +100,7 @@ Resultados:
 
 - Ejecutable: `pc/target/release/soundshare`.
 - APK: `android/app/build/outputs/apk/debug/app-debug.apk`.
-- Con `--bundle`: `dist/SoundShare.apk` y `dist/SoundShare-<distribución>-<arquitectura>.tar.gz`, con APK, ejecutable, comando de inicio e instalador de dependencias. El APK usa la firma debug del entorno de compilación, igual que la app debug existente.
+- Con `--bundle`: `dist/SoundShare.apk` y `dist/SoundShare-<distribución>-<arquitectura>.tar.gz`, con APK, ejecutable, comando de inicio e instalador de dependencias, más `dist/SHA256SUMS` para verificar las descargas. El APK usa la firma debug del entorno de compilación, igual que la app debug existente.
 
 Para empaquetar artefactos existentes sin volver a compilarlos: `./scripts/package.sh`. También podés combinar `--bundle` con `--pc` o `--android` si el artefacto omitido ya existe. El paquete incluye una única APK, que podés instalar directamente desde el administrador de archivos del teléfono.
 
