@@ -8,11 +8,13 @@ fail() {
 
 usage() {
     cat <<'EOF'
-Uso: scripts/build.sh [--pc | --android] [--install]
+Uso: scripts/build.sh [--pc | --android] [--install] [--bundle]
   Sin flags: compila la PC en release y la APK debug.
   --pc       Compila solo la PC.
   --android  Compila solo la APK.
   --install  Después de compilar, ejecuta soundshare install.
+             Si omitís una parte, sus artefactos deben existir previamente.
+  --bundle   Genera dist/SoundShare.apk y un .tar.gz listo para usar en la PC.
              Si omitís una parte, sus artefactos deben existir previamente.
   -h, --help Muestra esta ayuda.
 EOF
@@ -22,6 +24,7 @@ build_pc=true
 build_android=true
 selection=''
 install_app=false
+bundle=false
 for arg in "$@"; do
     case "$arg" in
         --pc|--android)
@@ -31,6 +34,7 @@ for arg in "$@"; do
             selection="$arg"
             ;;
         --install) install_app=true ;;
+        --bundle) bundle=true ;;
         -h|--help) usage; exit 0 ;;
         *) fail "Opción desconocida: $arg. Usá --help para ver la ayuda." ;;
     esac
@@ -104,7 +108,7 @@ fi
 
 if $build_pc; then
     printf 'Compilando SoundShare para la PC (release)…\n'
-    (cd -- "$repo_root/pc" && cargo build --release)
+    (cd -- "$repo_root/pc" && cargo build --release --locked)
     printf 'Ejecutable: %s/pc/target/release/soundshare\n' "$repo_root"
 fi
 
@@ -118,6 +122,10 @@ if $install_app; then
     [[ -x "$repo_root/pc/target/release/soundshare" ]] || fail 'Falta el ejecutable de la PC. Compilalo sin --android o con --pc.'
     printf 'Instalando la app en el teléfono…\n'
     "$repo_root/pc/target/release/soundshare" install
+fi
+
+if $bundle; then
+    "$repo_root/scripts/package.sh"
 fi
 
 printf 'Listo.\n'

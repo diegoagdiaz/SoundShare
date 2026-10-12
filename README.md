@@ -14,18 +14,52 @@ Medios Android → REMOTE_SUBMIX → USB/adb → PipeWire → salida de la PC
                                   S16LE, 48 kHz, estéreo
 ```
 
-La PC escucha en `127.0.0.1:47100`. Todas las conexiones las abre el teléfono hacia su propio `127.0.0.1:47100`; el túnel `adb reverse tcp:47100 tcp:47100` las lleva por USB a la PC. SoundShare configura ese túnel automáticamente. Requiere depuración USB, incluso en Móvil → PC.
+## Inicio rápido
 
-## Requisitos
+En el teléfono, instalá **SoundShare.apk** y, la primera vez, activá **Depuración USB** en las opciones de desarrollador. Al conectar el cable, desbloqueá el teléfono y aceptá la autorización de la PC; podés marcar «Permitir siempre desde esta computadora».
+
+En una PC Linux con PipeWire, descomprimí el paquete `SoundShare-<distribución>-<arquitectura>.tar.gz` y ejecutá desde la carpeta **SoundShare**:
+
+```bash
+./soundshare
+```
+
+Eso prepara las dependencias faltantes, configura la conexión USB y abre la app en el teléfono. Elegí **PC → Móvil** o **Móvil → PC** desde la app. Para salir, `q` + Enter o `Ctrl+C`. No necesitás Rust, Java ni Android SDK para usar el paquete. El ejecutable requiere bibliotecas compatibles con la distribución y arquitectura indicadas en el nombre del archivo; no es un binario universal para todo Linux.
+
+Si preferís preparar la PC antes de empezar, son dos comandos:
+
+```bash
+./scripts/setup.sh    # Una vez
+./soundshare         # Cada vez que lo quieras usar
+```
+
+La instalación automática de dependencias admite Fedora y Debian/Ubuntu y puede pedir tu contraseña de `sudo`. En otras distribuciones, instalá `adb`, PipeWire y WirePlumber con tu gestor de paquetes. PipeWire y WirePlumber deben estar activos en la sesión del usuario; el script no cambia ni reinicia la configuración de audio.
+
+**Desde este repositorio** también podés ejecutar `./soundshare`: prepara las herramientas y compila únicamente la PC en la primera ejecución. En ese caso necesitás cabeceras de PipeWire ≥ 1.2 y Rust ≥ 1.88; si falta Rust, el script instala la versión estable con el instalador oficial. La APK se instala por separado en el teléfono, sin compilar Android en la PC de uso.
+
+Para arrancar directamente en un sentido:
+
+```bash
+./soundshare pc2phone
+./soundshare phone2pc
+```
+
+La depuración USB sigue siendo necesaria en ambos sentidos con el transporte actual. Instalar el APK no puede activar ni autorizar ese permiso por vos.
+
+## Conexión
+
+La PC escucha en `127.0.0.1:47100`. Todas las conexiones las abre el teléfono hacia su propio `127.0.0.1:47100`; el túnel `adb reverse tcp:47100 tcp:47100` las lleva por USB a la PC. SoundShare configura ese túnel automáticamente.
+
+## Requisitos para desarrollar y compilar
 
 - Linux con PipeWire ≥ 1.0 y WirePlumber. El crate actual usa `pipewire-rs 0.10.1` con la feature `v1_2_0`; la compatibilidad de compilación con cabeceras anteriores a 1.2 no está verificada.
-- Rust estable actualizado, `pkg-config`, cabeceras de PipeWire y clang/libclang para bindgen. En Fedora: `sudo dnf install pipewire-devel clang pkgconf-pkg-config`.
+- Rust ≥ 1.88, `pkg-config`, cabeceras de PipeWire ≥ 1.2 y clang/libclang para bindgen. En Fedora: `sudo dnf install pipewire-devel clang pkgconf-pkg-config`.
 - `adb` de Android SDK Platform-Tools.
 - Para la APK: JDK 17 o superior **con `javac`**, Android SDK con plataforma 36 (`compileSdk = 36`). El proyecto usa AGP 9.4.1 con Kotlin integrado y wrapper Gradle 9.8.0, sin AndroidX.
 - Teléfono: Android 8+ para PC → Móvil (`minSdk = 26`). Móvil → PC necesita Android 11+ y fue probado solo en Android 11; usa APIs internas cuya compatibilidad depende del sistema.
 - Cable USB que permita datos y depuración USB autorizada en el teléfono.
 
-## Compilar e instalar
+## Compilar y generar el paquete
 
 Desde la raíz:
 
@@ -39,6 +73,7 @@ Compila la PC en release y la APK debug. Si falta `JAVA_HOME`, busca un JDK con 
 ./scripts/build.sh --pc          # Solo la PC
 ./scripts/build.sh --android     # Solo la APK
 ./scripts/build.sh --install     # Ambas partes y luego instala en el teléfono
+./scripts/build.sh --bundle      # Ambas partes y genera el paquete para distribuir
 ```
 
 `--pc` y `--android` son excluyentes. Se puede agregar `--install` a cualquiera: necesitás el ejecutable de la PC y una APK ya compilados para la parte que omitís. La instalación usa el dispositivo seleccionado por `ANDROID_SERIAL`, si está definido.
@@ -55,6 +90,9 @@ Resultados:
 
 - Ejecutable: `pc/target/release/soundshare`.
 - APK: `android/app/build/outputs/apk/debug/app-debug.apk`.
+- Con `--bundle`: `dist/SoundShare.apk` y `dist/SoundShare-<distribución>-<arquitectura>.tar.gz`, con APK, ejecutable, comando de inicio e instalador de dependencias. El APK usa la firma debug del entorno de compilación, igual que la app debug existente.
+
+Para empaquetar artefactos existentes sin volver a compilarlos: `./scripts/package.sh`. También podés combinar `--bundle` con `--pc` o `--android` si el artefacto omitido ya existe. El paquete incluye una única APK, que podés instalar directamente desde el administrador de archivos del teléfono.
 
 Conectá y autorizá el teléfono, y ejecutá:
 
@@ -64,16 +102,16 @@ pc/target/release/soundshare install
 pc/target/release/soundshare install android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-`install` busca las APK release y debug subiendo desde la ubicación del ejecutable y elige la más reciente por fecha de modificación. También acepta una ruta explícita.
+`install` busca `SoundShare.apk` y las APK release y debug subiendo desde la ubicación del ejecutable y elige la más reciente por fecha de modificación. También acepta una ruta explícita.
 
 ## Usar
 
 En la PC:
 
 ```bash
-pc/target/release/soundshare            # Espera al teléfono
-pc/target/release/soundshare pc2phone   # Arranca en PC → Móvil
-pc/target/release/soundshare phone2pc   # Arranca en Móvil → PC
+./soundshare            # Espera al teléfono y abre la app al conectar
+./soundshare pc2phone   # Arranca en PC → Móvil
+./soundshare phone2pc   # Arranca en Móvil → PC
 ```
 
 Mientras corre, escribí un comando y presioná Enter:
@@ -89,18 +127,18 @@ Mientras corre, escribí un comando y presioná Enter:
 
 `Ctrl+C` también sale en orden y restaura la salida configurada anterior de PipeWire. Al activar PC → Móvil, crea el sink `SoundShare → Móvil` (`soundshare_to_phone`) y lo pone como salida por defecto mediante `default.configured.audio.sink`. Si el valor anterior ya apuntaba a SoundShare, lo limpia al apagar para no restaurar un sink de una ejecución interrumpida.
 
-En Android, abrí **SoundShare** y tocá **PC → Móvil** o **Móvil → PC**. Tocar la tarjeta activa o **Detener** apaga el modo. La app muestra estadísticas y mantiene un servicio en primer plano con notificación y acción **Salir**. Esa acción pide apagar ambos sentidos y espera hasta 500 ms la confirmación de la PC antes de cerrar. La PC decide el modo y lo informa a la app. En PC → Móvil abre la app si no hay un canal de control conectado; si se desconecta la última app, apaga ese modo automáticamente.
+La PC abre **SoundShare** al detectar el teléfono autorizado; si el sistema impide abrirla, podés abrirla manualmente. Tocá **PC → Móvil** o **Móvil → PC**. Tocar la tarjeta activa o **Detener** apaga el modo. La app muestra estadísticas y mantiene un servicio en primer plano con notificación y acción **Salir**. Esa acción pide apagar ambos sentidos y espera hasta 500 ms la confirmación de la PC antes de cerrar. La PC decide el modo y lo informa a la app. En PC → Móvil abre la app si no hay un canal de control conectado; si se desconecta la última app, apaga ese modo automáticamente. Al reconectar el cable, vuelve a abrir la app; el modo se elige otra vez.
 
 En Móvil → PC, la PC lanza el capturador con permisos de shell (uid 2000), sin root. Android desvía la salida de medios al `REMOTE_SUBMIX` y el parlante del teléfono se calla. El capturador intenta poner al máximo el volumen de ese dispositivo virtual, conservando el del parlante; regulá la escucha desde la PC. Suena como un stream de reproducción `SoundShare (Móvil)` por la salida de la PC.
 
 Opciones y diagnóstico:
 
 ```bash
-pc/target/release/soundshare -s SERIAL  # También acepta ANDROID_SERIAL
-pc/target/release/soundshare phone2pc -o NOMBRE_SALIDA  # También --output o SOUNDSHARE_OUTPUT
-SOUNDSHARE_DEBUG=1 pc/target/release/soundshare
-SOUNDSHARE_DUMP=recibido.pcm pc/target/release/soundshare phone2pc
-SOUNDSHARE_FORCE_RATE=1.01 pc/target/release/soundshare  # Solo para medir la corrección
+./soundshare -s SERIAL  # También acepta ANDROID_SERIAL; obligatorio si hay varios dispositivos
+./soundshare phone2pc -o NOMBRE_SALIDA  # También --output o SOUNDSHARE_OUTPUT
+SOUNDSHARE_DEBUG=1 ./soundshare
+SOUNDSHARE_DUMP=recibido.pcm ./soundshare phone2pc
+SOUNDSHARE_FORCE_RATE=1.01 ./soundshare  # Solo para medir la corrección
 ```
 
 `-o/--output SALIDA` elige el `node.name` de PipeWire para Móvil → PC (consultá `pactl list short sinks`). Tiene prioridad sobre `SOUNDSHARE_OUTPUT`; sin ambos se usa la salida actual. Si la salida elegida no existe, el stream no cae a otra salida. `SOUNDSHARE_DUMP` guarda PCM crudo S16LE, 48 kHz estéreo, tal como llega del teléfono, antes del resampler; puede agregar carga de disco.
@@ -136,7 +174,9 @@ Móvil → PC tiene un objetivo promedio inicial de 26 ms; arranca al reunir ese
 
 - **Teléfono `unauthorized`:** desbloquealo y aceptá el diálogo de depuración USB.
 - **Puerto en uso:** revisá si ya hay otro SoundShare abierto y cerralo. Cambiar `-p` no cambia el puerto de la app actual.
-- **App no instalada:** compilá la APK y ejecutá `soundshare install` con su ruta si hace falta.
+- **App no instalada:** instalá `SoundShare.apk` desde el teléfono y reconectá el cable, o ejecutá `./soundshare install SoundShare.apk` desde la carpeta del paquete.
+- **Varios dispositivos conectados:** elegí el teléfono con `./soundshare -s SERIAL` o desconectá los demás.
+- **Binario incompatible:** usá un paquete para tu distribución y arquitectura, o ejecutá `./soundshare` desde el código fuente para compilar en tu PC.
 - **Parpadeo al iniciar Móvil → PC:** cuando el sistema exige una actividad visible, el capturador abre un instante `com.android.shell/.HeapDumpActivity`. Intenta cerrar sus tareas con `am stack` en Android 11; si no está disponible, abre SoundShare para taparla, y usa Inicio como último recurso. Android 12+ tiene atribución explícita al shell, pero sigue pendiente probar la captura en un equipo de esa versión.
 - **PC → Móvil sin sonido:** revisá que la salida por defecto sea **SoundShare → Móvil**, que la aplicación de la PC use esa salida y que el volumen del teléfono permita escuchar. Si faltan los metadatos de PipeWire, seleccioná el sink a mano.
 - **Falta PipeWire al compilar:** instalá `pipewire-devel` y clang/libclang; el script corta si `pkg-config` no encuentra `libpipewire-0.3`.

@@ -7,7 +7,7 @@
     <string name="phone_to_pc_hint">El audio del teléfono suena en la PC</string>
     <string name="stop">Detener</string>
     <string name="status_waiting">Esperando a la PC…</string>
-    <string name="status_waiting_hint">Conectá el cable y ejecutá «soundshare» en la PC.</string>
+    <string name="status_waiting_hint">Conectá el cable USB y ejecutá «./soundshare» en la PC. La primera vez, activá Depuración USB en las opciones de desarrollador y aceptá la autorización.</string>
     <string name="status_connected">Conectado a la PC</string>
     <string name="status_idle">Elegí hacia dónde va el audio.</string>
     <string name="status_pc_to_phone">Reproduciendo el audio de la PC</string>

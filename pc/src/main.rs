@@ -99,14 +99,24 @@ fn block_signals() -> libc::sigset_t {
 }
 
 fn pick_device(adb: &Adb, serial: Option<&str>) -> Result<Option<adb::Device>, String> {
-    let devices = adb.devices().map_err(|e| e.to_string())?;
-    Ok(devices.into_iter().find(|d| serial.is_none_or(|s| s == d.serial)))
+    select_device(adb.devices().map_err(|e| e.to_string())?, serial)
 }
 
-/// Busca la APK compilada junto al proyecto.
+fn select_device(devices: Vec<adb::Device>, serial: Option<&str>) -> Result<Option<adb::Device>, String> {
+    if let Some(serial) = serial {
+        return Ok(devices.into_iter().find(|d| d.serial == serial));
+    }
+    if devices.len() > 1 {
+        let serials = devices.iter().map(|d| d.serial.as_str()).collect::<Vec<_>>().join(", ");
+        return Err(format!("Hay varios dispositivos ({serials}). Elegí uno con -s SERIAL o desconectá los demás."));
+    }
+    Ok(devices.into_iter().next())
+}
+
+/// Busca la APK del paquete distribuido o la compilada junto al proyecto.
 fn default_apk() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let candidates = ["android/app/build/outputs/apk/release/app-release.apk", "android/app/build/outputs/apk/debug/app-debug.apk"];
+    let candidates = ["SoundShare.apk", "android/app/build/outputs/apk/release/app-release.apk", "android/app/build/outputs/apk/debug/app-debug.apk"];
     exe.ancestors()
         .flat_map(|dir| candidates.iter().map(move |c| dir.join(c)))
         .filter_map(|p| {
@@ -168,15 +178,21 @@ fn watch_devices(hub: Arc<Hub>, adb: Adb, serial: Option<String>, port: u16, sta
                 Some(d) => match adb.reverse(&d.serial, port) {
                     Ok(()) => {
                         println!("● Teléfono conectado: {} ({})", d.model, d.serial);
-                        match adb.package_path(&d.serial) {
-                            Ok(Some(_)) => println!("  Abrí SoundShare en el teléfono o elegí el modo acá (1 / 2)."),
-                            _ => println!("⚠ La app no está instalada: ejecutá «soundshare install»."),
-                        }
                         current = ready.clone();
                         warned.clear();
                         hub.device_changed(ready.clone());
-                        if let Some(m) = start_mode.take() {
-                            hub.set_mode(m);
+                        match adb.package_path(&d.serial) {
+                            Ok(Some(_)) => {
+                                println!("  Abriendo SoundShare: elegí el sentido del audio en el teléfono (o acá: 1 / 2).");
+                                if let Err(e) = adb.start_app(&d.serial) {
+                                    eprintln!("⚠ No pude abrir la app: {e}. Abrí SoundShare en el teléfono.");
+                                }
+                                if let Some(m) = start_mode.take() {
+                                    hub.set_mode(m);
+                                }
+                            }
+                            Ok(None) => println!("⚠ Instalá SoundShare.apk en el teléfono y reconectá el cable (también podés usar «soundshare install»)."),
+                            Err(e) => eprintln!("⚠ No pude comprobar la app: {e}. Revisá el teléfono y reconectá el cable."),
                         }
                     }
                     Err(e) => eprintln!("✗ No pude abrir el túnel USB: {e}"),
@@ -255,4 +271,29 @@ fn main() {
         }
     }
     hub.shutdown();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn device(serial: &str, state: &str) -> adb::Device {
+        adb::Device { serial: serial.into(), state: state.into(), model: "Android".into() }
+    }
+
+    #[test]
+    fn selects_only_device_including_pending_usb_authorization() {
+        assert!(select_device(vec![], None).unwrap().is_none());
+        let phone = device("phone", "unauthorized");
+        assert_eq!(select_device(vec![phone.clone()], None).unwrap(), Some(phone));
+    }
+
+    #[test]
+    fn multiple_devices_require_explicit_selection() {
+        let phones = vec![device("first", "unauthorized"), device("second", "device")];
+        let error = select_device(phones.clone(), None).unwrap_err();
+        assert!(error.contains("-s SERIAL"));
+        assert_eq!(select_device(phones.clone(), Some("second")).unwrap(), Some(phones[1].clone()));
+        assert!(select_device(phones, Some("missing")).unwrap().is_none());
+    }
 }

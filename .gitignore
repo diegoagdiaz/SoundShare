@@ -1,5 +1,6 @@
 # Rust: conservar Cargo.lock, ignorar artefactos.
 /pc/target/
+/dist/
 
 # Android / Gradle: conservar el wrapper y su JAR.
 /android/.gradle/
