@@ -40,5 +40,10 @@
     <string name="transport_hint_unavailable">AOA no disponible; se usa adb. Tocá AOA para reintentar.</string>
     <string name="transport_hint_failed">Falló el enlace AOA; se usa adb. Tocá AOA para reintentar.</string>
     <string name="transport_hint_disconnected">Accesorio desconectado; se usa adb cuando vuelve el enlace.</string>
+    <string name="profile_title">Latencia PC → Móvil</string>
+    <string name="profile_stable">Estable</string>
+    <string name="profile_minimal">Mínima</string>
+    <string name="profile_hint_stable">La cola se adapta a los huecos del USB para no cortar.</string>
+    <string name="profile_hint_minimal">Sin colchón: suena lo último que llegó, aunque haya cortes.</string>
     <string name="transport_hint_reconnect">Reconectá el cable y arrancá la PC con AOA habilitado.</string>
 </resources>

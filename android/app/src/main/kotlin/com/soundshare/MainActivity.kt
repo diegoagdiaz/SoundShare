@@ -28,6 +28,9 @@ class MainActivity : Activity() {
     private lateinit var transportHint: TextView
     private lateinit var btnTransportAoa: TextView
     private lateinit var btnTransportAdb: TextView
+    private lateinit var profileHint: TextView
+    private lateinit var btnProfileStable: TextView
+    private lateinit var btnProfileMinimal: TextView
 
     private val listener: () -> Unit = { render() }
 
@@ -50,6 +53,11 @@ class MainActivity : Activity() {
         btnTransportAdb = findViewById(R.id.btnTransportAdb)
         btnTransportAoa.setOnClickListener { LinkService.requestTransport(this, TransportChoice.AOA) }
         btnTransportAdb.setOnClickListener { LinkService.requestTransport(this, TransportChoice.ADB) }
+        profileHint = findViewById(R.id.profileHint)
+        btnProfileStable = findViewById(R.id.btnProfileStable)
+        btnProfileMinimal = findViewById(R.id.btnProfileMinimal)
+        btnProfileStable.setOnClickListener { LinkService.requestLatency(this, LatencyProfile.STABLE); render() }
+        btnProfileMinimal.setOnClickListener { LinkService.requestLatency(this, LatencyProfile.MINIMAL); render() }
 
         // Tocar el modo activo lo apaga; tocar el otro cambia de dirección.
         btnPcToPhone.setOnClickListener { toggle(Mode.PC_TO_PHONE) }
@@ -163,9 +171,17 @@ class MainActivity : Activity() {
             view.contentDescription = if (view.isSelected) getString(R.string.transport_selected, view.text) else view.text
         }
 
+        val profile = LinkService.latencyProfile
+        profileHint.text = getString(if (profile == LatencyProfile.MINIMAL) R.string.profile_hint_minimal else R.string.profile_hint_stable)
+        for ((view, p) in listOf(btnProfileStable to LatencyProfile.STABLE, btnProfileMinimal to LatencyProfile.MINIMAL)) {
+            view.isSelected = profile == p
+            view.setBackgroundResource(if (view.isSelected) R.drawable.card_active else R.drawable.card)
+            view.contentDescription = if (view.isSelected) getString(R.string.transport_selected, view.text) else view.text
+        }
+
         val lines = mutableListOf<String>()
         LinkService.playerStats?.let { s ->
-            lines += "cola        %5.1f ms  (objetivo %.1f)".format(s.queuedMs, s.targetMs)
+            lines += "cola        %5.1f ms  (objetivo %.1f%s)".format(s.queuedMs, s.targetMs, if (s.minimal) ", fijo" else "")
             if (s.outputLatencyFrames >= 0) lines += "salida      %5.1f ms".format(s.outputLatencyMs)
             lines += "cortes      %5d".format(s.underruns)
             lines += "pista       %s".format(if (s.fastTrack) "baja latencia" else "normal")

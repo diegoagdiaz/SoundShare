@@ -26,6 +26,9 @@ pub struct Hub {
     st: Mutex<State>,
     aoa_open: Mutex<()>,
     next_id: AtomicU64,
+    /// Copia de `State::player` para el envío de audio: consultarla no espera al lock del estado,
+    /// que otros hilos retienen mientras escriben por adb.
+    player_id: AtomicU64,
     /// Último estado del reproductor del teléfono (para estadísticas).
     phone: PhoneStats,
     /// Diagnóstico: mayor intervalo entre envíos al teléfono (µs).
@@ -69,6 +72,7 @@ impl Hub {
             st: Mutex::new(State { show_stats: true, ..State::default() }),
             aoa_open: Mutex::new(()),
             next_id: AtomicU64::new(1),
+            player_id: AtomicU64::new(0),
             phone: PhoneStats::default(),
             max_send_us: AtomicU32::new(0),
             debug: std::env::var_os("SOUNDSHARE_DEBUG").is_some(),
@@ -131,6 +135,7 @@ impl Hub {
                 self.engine.send(Cmd::StopSink);
                 st.sink = None;
                 if let Some((_, s)) = st.player.take() {
+                    self.player_id.store(0, Ordering::Release);
                     s.close();
                 }
             }
@@ -395,6 +400,7 @@ impl Hub {
                 old.close();
             }
             st.player = Some((id, clone));
+            self.player_id.store(id, Ordering::Release);
             shared
         };
         let _consumer = shared.consumer.lock().unwrap();
@@ -449,13 +455,14 @@ impl Hub {
     }
 
     fn player_is_current(&self, id: u64) -> bool {
-        self.st.lock().unwrap().player.as_ref().is_some_and(|(pid, _)| *pid == id)
+        self.player_id.load(Ordering::Acquire) == id
     }
 
     fn finish_player(&self, id: u64) {
         let mut st = self.st.lock().unwrap();
         if st.player.as_ref().is_some_and(|(pid, _)| *pid == id) {
             st.player = None;
+            self.player_id.store(0, Ordering::Release);
         }
     }
 
