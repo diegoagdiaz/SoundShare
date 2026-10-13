@@ -12,7 +12,6 @@ import android.os.SystemClock
 import android.util.Log
 import java.io.EOFException
 import java.io.IOException
-import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -28,6 +27,7 @@ class Player(
     private val context: Context,
     private val accessory: AccessoryTransport?,
     private val profile: LatencyProfile,
+    private val endpoint: LinkEndpoint = LinkEndpoint(),
     private val onStats: (Stats?) -> Unit,
 ) {
 
@@ -83,7 +83,7 @@ class Player(
     }
 
     private fun session(run: PlayerGeneration) {
-        val usb = run.ifActive { accessory?.connect() }
+        val usb = run.ifActive { if (endpoint.wifi) null else accessory?.connect() }
         if (usb != null) {
             if (!run.attach(usb)) return
             try {
@@ -107,14 +107,13 @@ class Player(
         try {
             s.use {
                 if (!run.active) return
-                s.tcpNoDelay = true
-                s.connect(InetSocketAddress("127.0.0.1", Protocol.PORT), 2000)
+                endpoint.connect(s)
                 if (!run.active) return
                 val input = s.getInputStream()
                 val out = s.getOutputStream()
                 Protocol.writeHello(out, Protocol.ROLE_PLAYER)
                 val fmt = Protocol.readFormat(input)
-                if (run.active) play(run, fmt, input, out, "adb")
+                if (run.active) play(run, fmt, input, out, if (endpoint.wifi) "wifi" else "adb")
             }
         } finally {
             run.detach(s)
@@ -145,8 +144,8 @@ class Player(
             )
             .setTransferMode(AudioTrack.MODE_STREAM)
             .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-            // Capacidad holgada (200 ms); la latencia real la fija bufferSizeInFrames.
-            .setBufferSizeInBytes(fmt.sampleRate / 5 * frameBytes)
+            // Capacidad holgada (500 ms WiFi, 200 ms USB); el objetivo fija la latencia real.
+            .setBufferSizeInBytes(PlayerBuffer.capacityFrames(fmt.sampleRate, endpoint.wifi) * frameBytes)
             .build()
 
         val playback = java.io.Closeable { track.pause(); track.flush() }
@@ -160,9 +159,8 @@ class Player(
             val prefs = context.getSharedPreferences("player", Context.MODE_PRIVATE)
             // Arrancamos donde terminó la última sesión: el jitter del USB depende del teléfono y la PC.
             // Cada perfil aprende por separado, así el mínimo no achica la cola del estable.
-            val learnedKey = (if (minimal) "target_ms_min_" else "target_ms_") +
-                (if (transport == "adb") "" else "aoa_") + fmt.sampleRate
-            val initialMs = prefs.getFloat(learnedKey, if (minimal) INITIAL_MINIMAL_TARGET_MS else INITIAL_TARGET_MS)
+            val learnedKey = PlayerBuffer.learnedKey(transport, fmt.sampleRate, minimal)
+            val initialMs = prefs.getFloat(learnedKey, PlayerBuffer.initialMs(endpoint.wifi, minimal))
             val target = QueueTarget(burst, fmt.sampleRate, capacity / 2, (initialMs * fmt.sampleRate / 1000).toInt(), profile)
             var bufferFrames = 0
             fun applyTarget() {
@@ -381,9 +379,6 @@ class Player(
 
     companion object {
         private const val TAG = "SoundShare.Player"
-        /** Primer arranque en un teléfono nuevo: un valor típico del túnel de adb. */
-        private const val INITIAL_TARGET_MS = 30f
-        private const val INITIAL_MINIMAL_TARGET_MS = 10f
         private const val STATUS_PERIOD_NS = 10_000_000L
         /** Lo primero tras arrancar el parlante no cuenta (Android tarda en despertar el hardware). */
         private const val SETTLE_NS = 700_000_000L

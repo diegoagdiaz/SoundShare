@@ -6,11 +6,13 @@ Esta especificación describe `pc/src/protocol.rs`, `hub.rs`, `engine.rs` y las 
 
 La PC escucha TCP en loopback. El puerto predeterminado es **47100**. El teléfono siempre inicia las conexiones hacia su propio `127.0.0.1:47100`; `adb reverse tcp:47100 tcp:47100` las lleva por USB hasta la PC. No hay conexiones TCP iniciadas por la PC hacia el teléfono. La PC negocia el accesorio USB antes de configurar adb reverse. CONTROL y CAPTURE tienen su propio socket. PLAYER usa AOA cuando está disponible, con fallback al socket original.
 
-La PC acepta otro puerto con `-p` y lo pasa al capturador y al túnel, pero `LinkService` y `Player` usan la constante 47100. No hay descubrimiento ni negociación de puerto en la app actual.
+**WiFi nativo:** la PC escucha además en TCP `puerto + 1` sobre todas las interfaces y en UDP 47101. Cada conexión de la red pasa primero un preámbulo de autenticación y después sigue exactamente este protocolo. El emparejamiento (`LAN_PAIR`/`LAN_PAIRED`), el descubrimiento, el preámbulo y las líneas `CAPTURE app`, `CAPTURE_FAILED` y `CAPTURE_LATENCY` se describen en [INALAMBRICO.md](INALAMBRICO.md).
+
+La PC acepta otro puerto con `-p` y lo pasa al capturador y al túnel, pero el enlace adb de `LinkService` y `Player` usa la constante 47100. WiFi nativo descubre el puerto TCP real por UDP 47101.
 
 Los offsets son en bytes, desde cero al comienzo de cada bloque. Todos los enteros multibyte y muestras son **little-endian**. Un frame contiene una muestra por canal; estéreo se intercala izquierda, derecha. TCP es un flujo: una lectura puede contener un bloque parcial, varios bloques o un frame partido. Hay que juntar los bytes necesarios y conservar los sobrantes; los límites de `write` no son delimitadores.
 
-No hay compresión, cifrado propio, autenticación propia ni timestamps de audio. TCP conserva PCM sin cabeceras por bloque; AOA agrega una envoltura de transporte descrita abajo. La autorización de depuración USB pertenece a adb; el descriptor AOA requiere además el permiso de UsbManager. El formato se fija una vez por conexión de audio; cambiarlo requiere otro socket.
+No hay compresión, cifrado propio ni timestamps de audio. WiFi nativo agrega autenticación antes del hello; por USB la autorización pertenece a adb y el descriptor AOA requiere además el permiso de UsbManager. TCP conserva PCM sin cabeceras por bloque; AOA agrega una envoltura de transporte descrita abajo. El formato se fija una vez por conexión de audio; cambiarlo requiere otro socket.
 
 ## Hello binario: 8 bytes
 
@@ -40,14 +42,16 @@ S16LE representa enteros con signo de 16 bits; F32LE representa float IEEE 754 d
 
 | Rol | Emisor del formato y PCM | Formato actual | Bytes/frame | Bytes/s nominales |
 | --- | --- | --- | --- | --- |
-| PLAYER | PC | 48000 Hz, 2 canales, F32LE | 8 | 384000 |
+| PLAYER por adb/AOA | PC | 48000 Hz, 2 canales, F32LE | 8 | 384000 |
+| PLAYER por WiFi nativo | PC | 48000 Hz, 2 canales, S16LE | 4 | 192000 |
 | CAPTURE | Capturador Android | 48000 Hz, 2 canales, S16LE | 4 | 192000 |
 
 Los bloques actuales son, en hexadecimal:
 
 ```text
-PLAYER:  80 bb 00 00 02 02 00 00 00 00 00 00
-CAPTURE: 80 bb 00 00 02 01 00 00 00 00 00 00
+PLAYER adb/AOA: 80 bb 00 00 02 02 00 00 00 00 00 00
+PLAYER WiFi:    80 bb 00 00 02 01 00 00 00 00 00 00
+CAPTURE:        80 bb 00 00 02 01 00 00 00 00 00 00
 ```
 
 El lector Rust acepta frecuencias de 8000 a 384000 Hz, 1–2 canales y ambos tipos de muestra. El lector Kotlin acepta 1–8 canales en la cabecera, pero `Player` solo configura salida mono o estéreo; ese rango del parser no constituye soporte multicanal. Los productores actuales siempre usan los formatos de la tabla, sin negociación.

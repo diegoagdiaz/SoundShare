@@ -15,8 +15,8 @@ android {
         // AudioTrack con modo de baja latencia existe desde Android 8.
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.3.2"
+        versionCode = 9
+        versionName = "0.4.2"
     }
 
     buildTypes {

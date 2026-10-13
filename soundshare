@@ -2,6 +2,10 @@
 set -euo pipefail
 
 root="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
+if [[ "${1:-}" == bluetooth ]]; then
+    shift
+    exec "$root/scripts/bluetooth.sh" "$@"
+fi
 binary="$root/bin/soundshare"
 if [[ ! -x "$binary" ]]; then
     binary="$root/pc/target/release/soundshare"
@@ -16,6 +20,7 @@ Uso: ./soundshare [pc2phone|phone2pc] [-s SERIAL] [-o SALIDA]
 Prepara la PC en la primera ejecución, instala la APK requerida si está disponible
 y abre la app al conectar el teléfono. Activá y autorizá la depuración USB.
 Instalación manual: ./soundshare install [ruta.apk]
+Bluetooth Móvil → PC: ./soundshare bluetooth [status|list|connect MAC|disconnect MAC]
 Para desactivar la instalación automática: SOUNDSHARE_NO_AUTO_INSTALL=1 ./soundshare
 Para preparar la PC por separado: ./scripts/setup.sh
 EOF

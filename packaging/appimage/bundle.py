@@ -35,6 +35,11 @@ def bundle(app_dir, binary):
     for name in ("AppRun", "soundshare.desktop", "soundshare.svg"):
         shutil.copy2(source / name, app_dir / name)
     shutil.copy2("/source/README.md", app_dir / "README.md")
+    (app_dir / "docs").mkdir()
+    for name in ("PROTOCOLO.md", "INALAMBRICO.md", "MEDICION_WIFI.md"):
+        shutil.copy2(Path("/source/docs") / name, app_dir / "docs" / name)
+    (app_dir / "scripts").mkdir()
+    shutil.copy2("/source/scripts/bluetooth.sh", app_dir / "scripts/bluetooth.sh")
     # The included APK also makes `./SoundShare-x86_64.AppImage install` work.
     shutil.copy2("/source/android/app/build/outputs/apk/debug/app-debug.apk", app_dir / "SoundShare.apk")
     shutil.copytree("/opt/pipewire/licenses", licenses / "pipewire")

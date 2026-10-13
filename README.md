@@ -1,6 +1,6 @@
 # SoundShare
 
-Audio entre una PC Linux con PipeWire y un teléfono Android por cable USB, como un cable auxiliar en cualquiera de los dos sentidos. Transporta PCM sin compresión y ajusta el reloj de la PC para evitar que la cola crezca o se vacíe por la diferencia entre los relojes de audio.
+Audio entre una PC Linux con PipeWire y un teléfono Android por cable USB o WiFi, como un cable auxiliar en cualquiera de los dos sentidos. Transporta PCM sin compresión y ajusta el reloj de la PC para evitar que la cola crezca o se vacíe por la diferencia entre los relojes de audio.
 
 Solo hay un sentido activo a la vez:
 
@@ -67,7 +67,7 @@ Para arrancar directamente en un sentido:
 ./soundshare phone2pc
 ```
 
-La depuración USB sigue siendo necesaria: CONTROL y CAPTURE usan adb, incluso cuando PLAYER va por AOA. Instalar el APK no puede activar ni autorizar ese permiso por vos.
+Por cable, la depuración USB sigue siendo necesaria: CONTROL y CAPTURE usan adb, incluso cuando PLAYER va por AOA. Después del emparejamiento, WiFi nativo funciona sin adb. Instalar el APK no puede activar ni autorizar la depuración USB por vos.
 
 ## Conexión
 
@@ -96,13 +96,51 @@ SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", ATTR{idProduct}=="2d01", MODE="0660", 
 
 SoundShare se ejecuta en la sesión de usuario, sin root. También necesita acceso al USB original para negociar AOA. No cambia reglas ni permisos del sistema; si no puede abrir el accesorio, informa el motivo y usa adb. AOA reemplaza MTP mientras está conectado; para volver a transferencia de archivos, desconectá y reconectá el cable.
 
+## Sin cable: WiFi
+
+Hay dos formas de usar SoundShare sin cable. Las dos necesitan que la PC y el teléfono estén en la misma red. Ver el diseño completo en [docs/INALAMBRICO.md](docs/INALAMBRICO.md).
+
+**WiFi nativo** (no necesita depuración):
+
+1. Conectá el teléfono **una vez** por USB con SoundShare abierto en la PC. La app se empareja sola con esa PC; la terminal muestra «WiFi: … emparejado con esta PC».
+2. Desconectá el cable. La app busca la PC emparejada en la red y se conecta sola. La tarjeta **Conexión** muestra **WiFi · nombre de la PC**.
+
+Elegí **Automática** (cable si está, si no WiFi), **USB** o **WiFi** en la tarjeta **Conexión**. Por WiFi:
+
+- **PC → Móvil** va por TCP directo en PCM de 16 bits, 48 kHz, estéreo (1,536 Mbit/s). La cola del teléfono aprende el jitter de la red como con USB, con su propio objetivo guardado; espera más latencia que por cable. La app mantiene un bloqueo WiFi de alto rendimiento en Android 8–13 y de baja latencia en Android 14+ mientras está conectada.
+- **Móvil → PC** usa la captura de Android para apps (Android 10+). La primera vez que lo elegís en cada sesión, Android pide permiso para **grabar o transmitir** la pantalla: SoundShare sólo usa el audio. A diferencia del cable, **el teléfono sigue sonando** (bajale el volumen), y no se capturan las apps que lo prohíben (algunas de video protegido y las llamadas). Si la app no está visible, una notificación pide el permiso.
+
+La PC escucha en **TCP 47101** por defecto (el puerto `-p` + 1) y siempre en **UDP 47101** para que la app la encuentre. Cada conexión prueba conocer el secreto del emparejamiento (HMAC-SHA256). **El audio no va cifrado:** en una red compartida, otro equipo podría escucharlo. Para no abrir los puertos de red: `./soundshare --no-wifi` o `SOUNDSHARE_WIFI=0`. La PC guarda su identidad y los teléfonos emparejados en `~/.config/soundshare/wifi`; borrar ese archivo desempareja todo.
+
+**Depuración inalámbrica** (Android 11+): con el teléfono emparejado por **Opciones de desarrollador → Depuración inalámbrica**, adb lo ve por la red y SoundShare funciona igual que por cable, incluido Móvil → PC con el capturador de siempre (el teléfono se calla). Sin cable no hay AOA: PC → Móvil va por adb. Para emparejar con el adb incluido en el AppImage: `./SoundShare-x86_64.AppImage adb pair IP:PUERTO CÓDIGO` (los datos aparecen en **Vincular dispositivo con un código**). Si el teléfono está a la vez por cable y por depuración inalámbrica, SoundShare usa el cable.
+
+Las [pruebas WiFi en el Moto](docs/MEDICION_WIFI.md) verifican ambos caminos de audio. PC → Móvil todavía presenta latencia alta y cortes durante el aprendizaje del buffer en esa red de 2,4 GHz.
+
+## Móvil → PC por Bluetooth
+
+Emparejá el teléfono y la PC desde la configuración Bluetooth de ambos equipos, confirmando el código. Con BlueZ, PipeWire y WirePlumber activos, el ayudante consulta la compatibilidad y conecta el perfil A2DP del teléfono:
+
+```bash
+./soundshare bluetooth status
+./soundshare bluetooth list
+./soundshare bluetooth connect AA:BB:CC:DD:EE:FF
+# Para desconectar sólo ese perfil:
+./soundshare bluetooth disconnect AA:BB:CC:DD:EE:FF
+```
+
+En la app Android, la tarjeta **Bluetooth · Móvil → PC**, debajo de **Conexión**, ofrece **Usar Bluetooth**: selecciona esa ruta y detiene la transmisión USB/WiFi de SoundShare. La elección queda guardada. **Conexión** muestra **Bluetooth seleccionado**, el nombre del destino de audio conectado y cuándo está transmitiendo. **Ajustes Bluetooth** permite emparejar la PC y elegirla como salida multimedia. Reproducí audio en tus apps del teléfono; no hay que iniciar la captura USB/WiFi de Móvil → PC.
+
+Android 12+ pide permiso para consultar los dispositivos Bluetooth conectados. Un dispositivo emparejado no basta: el indicador usa el perfil de audio A2DP y distingue conectado de transmitiendo. La transmisión la realiza el sistema Android, así que también podés usarla directamente desde sus ajustes sin abrir SoundShare ni autorizar depuración USB. Para volver al transporte nativo, elegí Automática, USB o WiFi.
+
+La salida de la PC se elige desde el gestor de sonido de Linux. El AppImage generado desde esta versión también admite `./SoundShare-x86_64.AppImage bluetooth list`. **PC → Móvil por Bluetooth queda pendiente**; ese sentido ya funciona por WiFi o USB. Ver [los detalles de Bluetooth](docs/INALAMBRICO.md#bluetooth).
+
 ## Requisitos para desarrollar y compilar
 
 - Linux con PipeWire ≥ 1.0 y WirePlumber. El crate actual usa `pipewire-rs 0.10.1` con la feature `v1_2_0`; la compatibilidad de compilación con cabeceras anteriores a 1.2 no está verificada.
 - Rust ≥ 1.88, `pkg-config`, cabeceras de PipeWire ≥ 1.2 y clang/libclang para bindgen. En Fedora: `sudo dnf install pipewire-devel clang pkgconf-pkg-config`.
 - `adb` de Android SDK Platform-Tools.
 - Para la APK: JDK 17 o superior **con `javac`**, Android SDK con plataforma 36 (`compileSdk = 36`). El proyecto usa AGP 9.4.1 con Kotlin integrado y wrapper Gradle 9.8.0, sin AndroidX.
-- Teléfono: Android 8+ para PC → Móvil (`minSdk = 26`). Móvil → PC necesita Android 11+; se verificó la captura en Android 11 y Android 16 (LineageOS 23.2, Samsung SM-A217M). Usa APIs internas cuya compatibilidad depende del sistema.
+- Teléfono: Android 8+ para PC → Móvil (`minSdk = 26`). Móvil → PC por WiFi nativo necesita Android 10+. Por cable o adb inalámbrico necesita Android 11+ y usa APIs internas; esa captura se verificó en Android 11 y Android 16 (LineageOS 23.2, Samsung SM-A217M).
 - Cable USB que permita datos y depuración USB autorizada en el teléfono.
 
 ## Compilar y generar el paquete
@@ -207,7 +245,7 @@ La PC acepta `-p PUERTO`, pero la app usa el puerto fijo 47100: dejá el predete
 
 ## Calidad y latencia
 
-PC → Móvil transporta float de 32 bits a 48 kHz estéreo. Móvil → PC transporta PCM de 16 bits a 48 kHz estéreo, el formato de la mezcla capturada. No hay codec con pérdidas. La corrección de reloj usa el resampler adaptativo de PipeWire con `resample.quality=10`; por eso la salida completa no se promete idéntica bit a bit tras el ajuste de reloj.
+PC → Móvil transporta float de 32 bits por adb/AOA y PCM de 16 bits por WiFi nativo, a 48 kHz estéreo. Móvil → PC transporta PCM de 16 bits a 48 kHz estéreo, el formato de la mezcla capturada. No hay codec con pérdidas; la conversión float a 16 bits por WiFi reduce la precisión de las muestras. La corrección de reloj usa el resampler adaptativo de PipeWire con `resample.quality=10`; por eso la salida completa no se promete idéntica bit a bit tras el ajuste de reloj.
 
 El sink de PC → Móvil pide un cuántum de 128 frames (2,7 ms) y sigue procesando aunque no haya audio. No comparte grafo con la placa de la laptop: el bloque más chico baja la latencia de la PC y el «serrucho» de la cola del teléfono, a cambio de unos 4 puntos más de CPU de un núcleo (medido: 7,5 % → 11 % el hub y 1,2 % → 1,9 % PipeWire). Móvil → PC conserva 256 frames. Android solicita AudioTrack de baja latencia; obtener una pista rápida depende del teléfono. En Android 12+, fija el [umbral de inicio de AudioTrack](https://developer.android.com/reference/android/media/AudioTrack#setStartThresholdInFrames(int)) en el objetivo de cola, separado de los dos bursts de margen para escribir. La cola recuerda el peor hueco del túnel USB en una ventana de 30 s: sube enseguida ante un hueco mayor y baja hasta un burst cada 20 s, sin pasar por debajo del nivel seguro. Los cortes elevan un piso que decae cada 30 s. El objetivo aprendido se guarda en SharedPreferences para la próxima sesión, separado para adb y AOA. Se conserva el mínimo de dos bursts; AOA se adapta con la misma política de huecos y cortes. Un corte con al menos un burst en la pista no agranda la cola: no lo causó la entrega, sino la salida de Android. Ante una acumulación grande se descarta el exceso para recuperar latencia.
 
@@ -251,6 +289,8 @@ La prueba fija el volumen de medios del teléfono en 1, activa `diag:`, usa ruid
 - **Puerto en uso:** revisá si ya hay otro SoundShare abierto y cerralo. Cambiar `-p` no cambia el puerto de la app actual.
 - **App no instalada o versión distinta:** SoundShare intenta instalar automáticamente la APK requerida al conectar. Si falta la APK, dejá `SoundShare.apk` junto al launcher o compilá ambas partes con `./scripts/build.sh`. También podés ejecutar `./soundshare install SoundShare.apk`. Si falla por una firma distinta, ejecutá `adb uninstall com.soundshare` (borra los datos) y reconectá; si el teléfono bloquea la instalación por USB, autorizala y usá el comando manual.
 - **Varios dispositivos conectados:** elegí el teléfono con `./soundshare -s SERIAL` o desconectá los demás.
+- **La app no encuentra la PC por WiFi:** revisá que estén en la misma red y que no sea una red de invitados con aislamiento entre equipos. Si usás un firewall que bloquea puertos altos, abrí TCP y UDP 47101 (en Fedora: `sudo firewall-cmd --add-port=47101/tcp --add-port=47101/udp`). Si reinstalaste la app o borraste `~/.config/soundshare/wifi`, conectá el cable una vez para volver a emparejar.
+- **Cortes por WiFi:** acercate al router, preferí 5 GHz y elegí el perfil **Estable**. El PCM usa TCP: una pérdida de paquetes puede frenar el audio hasta la retransmisión. La cola aprendida ayuda a cubrir esos huecos, pero no garantiza eliminar todos los cortes.
 - **Binario incompatible:** usá un paquete para tu distribución y arquitectura, o ejecutá `./soundshare` desde el código fuente para compilar en tu PC.
 - **El AppImage no monta con FUSE:** ejecutá `./SoundShare-x86_64.AppImage --appimage-extract-and-run`.
 - **Sin permisos USB:** el AppImage incluye adb, pero no puede modificar las reglas USB del sistema sin privilegios. Configurá las reglas udev de Android de tu distribución y volvé a conectar el teléfono; no ejecutes SoundShare con `sudo` porque necesita tu sesión de audio.
@@ -261,11 +301,12 @@ La prueba fija el volumen de medios del teléfono en 1, activa `diag:`, usa ruid
 
 ## Limitaciones y próximas ideas
 
-Actualmente necesita Linux/PipeWire, cable USB y depuración USB. No ofrece audio simultáneo en ambos sentidos, interfaz gráfica para la PC ni transporte Wi-Fi. Los formatos emitidos son fijos a 48 kHz estéreo. La latencia tiene el piso del hardware y el jitter del transporte elegido; el buffer puede crecer con los cortes y los descartes pueden producir un salto audible. El perfil **Mínima** corta varias veces por minuto en teléfonos con jitter USB alto (medido: ~9 por minuto en el moto g play). El piso que queda lo ponen la salida del teléfono (unos 23 ms de mezclador y HAL en el moto) y el jitter con que el teléfono recibe los bloques USB; dar tiempo real al hilo de envío de la PC no lo redujo. La captura usa APIs internas; se verificó en Android 11 y Android 16, sin garantizar todas las versiones ni las modificaciones de cada fabricante.
+Actualmente necesita Linux/PipeWire y, al menos una vez, cable USB con depuración USB (para instalar la app y emparejar el WiFi). No ofrece audio simultáneo en ambos sentidos ni interfaz gráfica para la PC. Por WiFi nativo el audio no va cifrado y Móvil → PC no silencia el teléfono. Los formatos emitidos son fijos a 48 kHz estéreo. La latencia tiene el piso del hardware y el jitter del transporte elegido; el buffer puede crecer con los cortes y los descartes pueden producir un salto audible. El perfil **Mínima** corta varias veces por minuto en teléfonos con jitter USB alto (medido: ~9 por minuto en el moto g play). El piso que queda lo ponen la salida del teléfono (unos 23 ms de mezclador y HAL en el moto) y el jitter con que el teléfono recibe los bloques USB; dar tiempo real al hilo de envío de la PC no lo redujo. La captura usa APIs internas; se verificó en Android 11 y Android 16, sin garantizar todas las versiones ni las modificaciones de cada fabricante.
 
 Ideas para una **v2**, todavía no implementadas:
 
 - PC → Móvil sin depuración USB: AOA ya lleva PLAYER, pero CONTROL todavía usa adb.
 - Interfaz gráfica para la PC.
-- Transporte opcional por Wi-Fi.
+- PC → Móvil por Bluetooth: requiere un transporte propio con audio comprimido (ver [docs/INALAMBRICO.md](docs/INALAMBRICO.md#pc--móvil-por-bluetooth)).
+- Emparejar el WiFi sin cable (código en pantalla) y cifrar el audio.
 - Más formatos: 24 bits y 44,1/96 kHz.

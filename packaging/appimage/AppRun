@@ -2,6 +2,10 @@
 set -euo pipefail
 
 app_dir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)"
+if [[ "${1:-}" == bluetooth ]]; then
+    shift
+    exec "$app_dir/scripts/bluetooth.sh" "$@"
+fi
 export LD_LIBRARY_PATH="$app_dir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PATH="$app_dir/usr/bin:$PATH"
 export ADB="${ADB:-$app_dir/usr/bin/adb}"

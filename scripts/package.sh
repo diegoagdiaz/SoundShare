@@ -19,13 +19,18 @@ cp -- "$binary" "$staging/SoundShare/bin/soundshare"
 cp -- "$apk" "$staging/SoundShare/SoundShare.apk"
 cp -- "$root/soundshare" "$staging/SoundShare/soundshare"
 cp -- "$root/scripts/setup.sh" "$staging/SoundShare/scripts/setup.sh"
+cp -- "$root/scripts/bluetooth.sh" "$staging/SoundShare/scripts/bluetooth.sh"
 cp -- "$root/README.md" "$staging/SoundShare/README.md"
 cp -- "$root/docs/PROTOCOLO.md" "$staging/SoundShare/docs/PROTOCOLO.md"
+cp -- "$root/docs/INALAMBRICO.md" "$staging/SoundShare/docs/INALAMBRICO.md"
+cp -- "$root/docs/MEDICION_WIFI.md" "$staging/SoundShare/docs/MEDICION_WIFI.md"
 cat > "$staging/SoundShare/LEEME.txt" <<'EOF'
 1. Activá Depuración USB en las opciones de desarrollador del teléfono.
 2. En esta carpeta de la PC, ejecutá: ./soundshare
 3. Conectá el cable USB y aceptá la autorización de depuración e instalación si aparece.
 4. SoundShare instala automáticamente la app requerida y la abre: elegí el sentido del audio.
+5. Para WiFi nativo, desconectá el cable después del primer emparejamiento y abrí
+   SoundShare en el teléfono, conectado a la misma red que la PC.
 
 El inicio instala adb si falta (puede pedir sudo). No necesita Rust, Java ni Android SDK.
 Para preparar las dependencias por separado: ./scripts/setup.sh
@@ -34,6 +39,14 @@ Para desactivar la instalación automática: SOUNDSHARE_NO_AUTO_INSTALL=1 ./soun
 PC → Móvil directamente: ./soundshare pc2phone
 Móvil → PC directamente: ./soundshare phone2pc
 Salir: q + Enter o Ctrl+C.
+
+WiFi nativo: TCP 47101 y UDP 47101; --no-wifi desactiva los puertos de red.
+Móvil → PC por WiFi requiere Android 10+ y autorización de captura de audio.
+Bluetooth Móvil → PC: emparejá desde Linux y Android y usá
+./soundshare bluetooth list y ./soundshare bluetooth connect MAC.
+En Android: Bluetooth · Móvil → PC → Usar Bluetooth selecciona esa ruta y detiene
+el audio USB/WiFi. Ajustes Bluetooth permite elegir la PC como salida multimedia.
+Más detalles: docs/INALAMBRICO.md.
 
 Requiere Linux con PipeWire y bibliotecas compatibles con la PC que compiló el paquete.
 El nombre del archivo indica la distribución y arquitectura de compilación.

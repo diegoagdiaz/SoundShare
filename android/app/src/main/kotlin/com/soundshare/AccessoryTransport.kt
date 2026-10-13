@@ -1,5 +1,6 @@
 package com.soundshare
 
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -14,7 +15,8 @@ import java.io.*
 import java.util.concurrent.atomic.AtomicInteger
 
 /** Descriptor persistente por cable; los modos abren sesiones lógicas, no lectores USB nuevos. */
-class AccessoryTransport(private val context: Context, private val onChanged: () -> Unit) {
+class AccessoryTransport(private val context: Context, private val canPrepare: () -> Boolean = { true },
+                         private val onChanged: () -> Unit) {
     private val usb = context.getSystemService(UsbManager::class.java)
     // Un pedido por cable; UsbAccessory.equals() lee la serie y sin permiso lanza SecurityException.
     private val permissionRequests = AccessoryPermissionRequests()
@@ -49,11 +51,18 @@ class AccessoryTransport(private val context: Context, private val onChanged: ()
     init {
         val filter = IntentFilter(PERMISSION).apply { addAction(UsbManager.ACTION_USB_ACCESSORY_DETACHED) }
         if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(receiver,filter,Context.RECEIVER_NOT_EXPORTED)
-        else context.registerReceiver(receiver,filter)
+        else registerLegacyReceiver(filter)
+    }
+
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    private fun registerLegacyReceiver(filter: IntentFilter) {
+        // Solo Android 8–12: la bandera aparece en API 33; la protección signature impide envíos de otras apps.
+        context.registerReceiver(receiver,filter,"${context.packageName}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",null)
     }
 
     @Synchronized fun prepare(explicit: Boolean = false) {
-        if (closed) return
+        // Un permiso pendiente de la sesión USB no debe abrir AOA si CONTROL ya pasó a WiFi.
+        if (closed || !canPrepare()) return
         if (explicit) failed = false
         if (failed || link != null) return
         val accessory = usb.accessoryList?.firstOrNull { it.manufacturer == "SoundShare" && it.model == "SoundShare" && it.version == "1" }
@@ -134,6 +143,8 @@ class AccessoryTransport(private val context: Context, private val onChanged: ()
         Thread({ runCatching { fd?.close() } },"ss-accessory-close").apply { isDaemon = true; start() }
     }
     @Synchronized fun close() { closed = true; context.unregisterReceiver(receiver); release() }
+    /** Bluetooth suspende el descriptor USB sin destruir el transporte, que puede volver a prepararse. */
+    @Synchronized fun pause() { release(); updateState(AccessoryState.UNAVAILABLE) }
 
     inner class Session internal constructor(val id: Int) : Closeable {
         private val opened = checkNotNull(link)
