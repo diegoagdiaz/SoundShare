@@ -7,6 +7,9 @@ mkdir -p /build/pc
 cp /source/pc/Cargo.toml /source/pc/Cargo.lock /build/pc/
 rm -rf /build/pc/src
 cp -r /source/pc/src /build/pc/src
+# El test de versión compara la constante de PC con la configuración de Android.
+mkdir -p /build/android/app
+cp /source/android/app/build.gradle.kts /build/android/app/
 cd /build/pc
 cargo test --locked
 cargo build --release --locked

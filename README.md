@@ -16,9 +16,9 @@ Medios Android → REMOTE_SUBMIX → USB/adb → PipeWire → salida de la PC
 
 ## Inicio rápido
 
-Descargá el [APK para Android](https://github.com/diegoagdiaz/SoundShare/releases/latest/download/SoundShare.apk) y el [AppImage para Linux x86_64](https://github.com/diegoagdiaz/SoundShare/releases/latest/download/SoundShare-x86_64.AppImage). También está disponible el paquete `.tar.gz` para **Fedora 44 x86_64** en [GitHub Releases](https://github.com/diegoagdiaz/SoundShare/releases/latest).
+Descargá el [AppImage para Linux x86_64](https://github.com/diegoagdiaz/SoundShare/releases/latest/download/SoundShare-x86_64.AppImage), que incluye la APK para Android. También están disponibles el [APK por separado](https://github.com/diegoagdiaz/SoundShare/releases/latest/download/SoundShare.apk) y el paquete `.tar.gz` para **Fedora 44 x86_64** en [GitHub Releases](https://github.com/diegoagdiaz/SoundShare/releases/latest).
 
-En el teléfono, instalá **SoundShare.apk** y, la primera vez, activá **Depuración USB** en las opciones de desarrollador. Al conectar el cable, desbloqueá el teléfono y aceptá la autorización de la PC; podés marcar «Permitir siempre desde esta computadora».
+En el teléfono, activá **Depuración USB** en las opciones de desarrollador. Al conectar el cable, desbloqueá el teléfono y aceptá la autorización de la PC; podés marcar «Permitir siempre desde esta computadora». SoundShare instala automáticamente la app si falta o si su versión difiere de la requerida por la PC. Si el teléfono pide autorizar la instalación por USB, aceptala también.
 
 En la carpeta donde descargaste el AppImage, ejecutá:
 
@@ -31,7 +31,7 @@ El AppImage incluye **adb, el cliente de PipeWire y sus bibliotecas y plugins**.
 
 Requiere **Linux x86_64 con glibc ≥ 2.36**, PipeWire y un gestor de sesión como WirePlumber activos en tu sesión, y permiso de acceso al teléfono por USB. El cliente incluido se conecta al servidor de audio de la PC. El AppImage no instala ni reemplaza ese servidor. En equipos donde FUSE no está disponible, ejecutá `./SoundShare-x86_64.AppImage --appimage-extract-and-run`; no necesitás instalar libfuse2 porque el runtime incluido es estático.
 
-El APK también está incluido en el AppImage: si preferís instalarlo por USB desde la PC, conectá y autorizá el teléfono y ejecutá `./SoundShare-x86_64.AppImage install`.
+Para instalar manualmente por USB desde la PC, conectá y autorizá el teléfono y ejecutá `./SoundShare-x86_64.AppImage install`.
 
 **Alternativa con el paquete `.tar.gz`:** descomprimí `SoundShare-<distribución>-<arquitectura>.tar.gz` y ejecutá desde la carpeta **SoundShare**:
 
@@ -39,7 +39,7 @@ El APK también está incluido en el AppImage: si preferís instalarlo por USB d
 ./soundshare
 ```
 
-Eso prepara las dependencias faltantes, configura la conexión USB y abre la app en el teléfono. No necesitás Rust, Java ni Android SDK para usar el paquete. El ejecutable del `.tar.gz` requiere bibliotecas compatibles con la distribución y arquitectura indicadas en el nombre del archivo.
+Eso prepara las dependencias faltantes, configura la conexión USB, instala la app requerida y la abre en el teléfono. No necesitás Rust, Java ni Android SDK para usar el paquete. El ejecutable del `.tar.gz` requiere bibliotecas compatibles con la distribución y arquitectura indicadas en el nombre del archivo.
 
 Si preferís preparar la PC antes de empezar, son dos comandos:
 
@@ -50,7 +50,7 @@ Si preferís preparar la PC antes de empezar, son dos comandos:
 
 La instalación automática de dependencias admite Fedora y Debian/Ubuntu y puede pedir tu contraseña de `sudo`. En otras distribuciones, instalá `adb`, PipeWire y WirePlumber con tu gestor de paquetes. PipeWire y WirePlumber deben estar activos en la sesión del usuario; el script no cambia ni reinicia la configuración de audio.
 
-**Desde este repositorio** también podés ejecutar `./soundshare`: prepara las herramientas y compila únicamente la PC en la primera ejecución. En ese caso necesitás cabeceras de PipeWire ≥ 1.2 y Rust ≥ 1.88; si falta Rust, el script instala la versión estable con el instalador oficial. La APK se instala por separado en el teléfono, sin compilar Android en la PC de uso.
+**Desde este repositorio** también podés ejecutar `./soundshare`: prepara las herramientas y compila únicamente la PC en la primera ejecución. En ese caso necesitás cabeceras de PipeWire ≥ 1.2 y Rust ≥ 1.88; si falta Rust, el script instala la versión estable con el instalador oficial. Para la instalación automática, dejá `SoundShare.apk` en la raíz del proyecto o compilá la APK con `./scripts/build.sh --android`.
 
 ```bash
 git clone https://github.com/diegoagdiaz/SoundShare.git
@@ -58,7 +58,7 @@ cd SoundShare
 ./soundshare
 ```
 
-No hace falta ejecutar `build.sh` ni `setup.sh` antes. En Fedora y Debian/Ubuntu, el inicio instala las dependencias faltantes; puede pedir `sudo`. Descargá el APK desde la release e instalalo en el teléfono. La primera compilación requiere conexión a Internet; las siguientes ejecuciones usan el ejecutable ya compilado.
+No hace falta ejecutar `setup.sh` antes. En Fedora y Debian/Ubuntu, el inicio instala las dependencias faltantes; puede pedir `sudo`. Si no compilás Android, descargá la APK de la misma release que la PC y guardala como `SoundShare.apk` en la raíz del proyecto. La primera compilación requiere conexión a Internet; las siguientes ejecuciones usan el ejecutable ya compilado.
 
 Para arrancar directamente en un sentido:
 
@@ -143,7 +143,7 @@ El script compila la PC y un cliente PipeWire 1.2.8 en un contenedor Debian 12 p
 
 Para verificar el capturador en un teléfono conectado: `python3 scripts/test_capture.py --serial SERIAL`. Usa la APK debug ya compilada sin instalarla, cuenta PCM en memoria durante tres segundos y elimina el APK temporal y su túnel al terminar. Durante la prueba desvía el audio de medios del teléfono, sin cambiar su volumen ni guardar la grabación. Agregá `--check-no-popup` para comprobar en el registro de actividades que el arranque no abrió el auxiliar en la pantalla principal, que la actividad visible se conservó y que la pantalla auxiliar se liberó.
 
-Conectá y autorizá el teléfono, y ejecutá:
+Conectá y autorizá el teléfono, y ejecutá `./soundshare`: instala la APK automáticamente si la app falta o tiene otro `versionCode`, incluso uno más nuevo. Para instalarla manualmente:
 
 ```bash
 pc/target/release/soundshare install
@@ -151,7 +151,9 @@ pc/target/release/soundshare install
 pc/target/release/soundshare install android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-`install` busca `SoundShare.apk` y las APK release y debug subiendo desde la ubicación del ejecutable y elige la más reciente por fecha de modificación. También acepta una ruta explícita.
+La instalación automática y `install` buscan `SoundShare.apk` y las APK release y debug subiendo desde la ubicación del ejecutable y eligen la más reciente por fecha de modificación. `install` también acepta una ruta explícita. La actualización conserva los datos de la app y requiere una firma compatible.
+
+SoundShare intenta instalar una sola vez por conexión del cable. Si falla, muestra el error de adb: autorizá la instalación por USB y usá `./soundshare install`; si la firma es distinta, ejecutá `adb uninstall com.soundshare` (borra los datos de la app) y reconectá. Si la APK encontrada tiene otra versión, recompilá ambas partes con `./scripts/build.sh`. Para desactivar la instalación automática y recibir solamente el aviso, usá `SOUNDSHARE_NO_AUTO_INSTALL=1 ./soundshare`.
 
 ## Usar
 
@@ -238,7 +240,7 @@ La prueba fija el volumen de medios del teléfono en 1, activa `diag:`, usa ruid
 
 - **Teléfono `unauthorized`:** desbloquealo y aceptá el diálogo de depuración USB.
 - **Puerto en uso:** revisá si ya hay otro SoundShare abierto y cerralo. Cambiar `-p` no cambia el puerto de la app actual.
-- **App no instalada:** instalá `SoundShare.apk` desde el teléfono y reconectá el cable, o ejecutá `./soundshare install SoundShare.apk` desde la carpeta del paquete.
+- **App no instalada o versión distinta:** SoundShare intenta instalar automáticamente la APK requerida al conectar. Si falta la APK, dejá `SoundShare.apk` junto al launcher o compilá ambas partes con `./scripts/build.sh`. También podés ejecutar `./soundshare install SoundShare.apk`. Si falla por una firma distinta, ejecutá `adb uninstall com.soundshare` (borra los datos) y reconectá; si el teléfono bloquea la instalación por USB, autorizala y usá el comando manual.
 - **Varios dispositivos conectados:** elegí el teléfono con `./soundshare -s SERIAL` o desconectá los demás.
 - **Binario incompatible:** usá un paquete para tu distribución y arquitectura, o ejecutá `./soundshare` desde el código fuente para compilar en tu PC.
 - **El AppImage no monta con FUSE:** ejecutá `./SoundShare-x86_64.AppImage --appimage-extract-and-run`.

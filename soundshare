@@ -13,8 +13,10 @@ if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
     fi
     cat <<'EOF'
 Uso: ./soundshare [pc2phone|phone2pc] [-s SERIAL] [-o SALIDA]
-Prepara la PC en la primera ejecución y abre la app al conectar el teléfono.
-Instalá SoundShare.apk y autorizá la depuración USB en el teléfono.
+Prepara la PC en la primera ejecución, instala la APK requerida si está disponible
+y abre la app al conectar el teléfono. Activá y autorizá la depuración USB.
+Instalación manual: ./soundshare install [ruta.apk]
+Para desactivar la instalación automática: SOUNDSHARE_NO_AUTO_INSTALL=1 ./soundshare
 Para preparar la PC por separado: ./scripts/setup.sh
 EOF
     exit 0

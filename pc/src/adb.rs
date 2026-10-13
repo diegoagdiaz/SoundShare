@@ -10,6 +10,10 @@ use std::time::{Duration, Instant};
 pub const PACKAGE: &str = "com.soundshare";
 const CAPTURE_CLASS: &str = "com.soundshare.capture.CaptureMain";
 
+fn parse_version_code(output: &str) -> Option<u32> {
+    output.split_whitespace().find_map(|part| part.strip_prefix("versionCode=")?.parse().ok())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Device {
     pub serial: String,
@@ -92,8 +96,8 @@ impl Adb {
         let out = receive(stdout)?;
         let err = receive(stderr)?;
         if !status.success() {
-            let err = String::from_utf8_lossy(&err);
-            return Err(io::Error::other(format!("adb {}: {}", args.join(" "), err.trim())));
+            let detail = format!("{}\n{}", String::from_utf8_lossy(&out), String::from_utf8_lossy(&err));
+            return Err(io::Error::other(format!("adb {}: {}", args.join(" "), detail.trim())));
         }
         Ok(String::from_utf8_lossy(&out).into_owned())
     }
@@ -133,9 +137,15 @@ impl Adb {
         Ok(out.lines().find_map(|l| l.trim().strip_prefix("package:").map(str::to_string)))
     }
 
+    /// dumpsys funciona también en Android 8 (minSdk 26).
+    pub fn installed_version_code(&self, serial: &str) -> io::Result<Option<u32>> {
+        let out = self.shell(serial, &format!("dumpsys package {PACKAGE}"))?;
+        Ok(parse_version_code(&out))
+    }
+
     pub fn install(&self, serial: &str, apk: &Path) -> io::Result<()> {
         let apk = apk.to_string_lossy();
-        self.run(Some(serial), &["install", "-r", &apk]).map(|_| ())
+        self.run(Some(serial), &["install", "-r", "-d", &apk]).map(|_| ())
     }
 
     pub fn start_app(&self, serial: &str) -> io::Result<()> {
@@ -156,6 +166,25 @@ impl Adb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_version_with_sdk_fields() {
+        let out = "Packages:\n  Package [com.soundshare] (abc):\n    versionCode=4 minSdk=26 targetSdk=34\n    versionName=0.3.0\n";
+        assert_eq!(parse_version_code(out), Some(4));
+    }
+
+    #[test]
+    fn missing_package_has_no_version() {
+        for out in ["", "\n  ", "Unable to find package: com.soundshare"] {
+            assert_eq!(parse_version_code(out), None);
+        }
+    }
+
+    #[test]
+    fn first_version_wins_with_multiple_entries() {
+        let out = "  versionCode=4 minSdk=26 targetSdk=34\nHidden system packages:\n  versionCode=2 minSdk=26 targetSdk=34";
+        assert_eq!(parse_version_code(out), Some(4));
+    }
 
     /// Simula un comando colgado sin depender de un dispositivo ni del servidor adb.
     #[test]

@@ -108,4 +108,4 @@ if ldd "$binary" 2>&1 | grep -q 'not found'; then
     ldd "$binary" >&2
     fail 'El ejecutable necesita bibliotecas de una distribución compatible. Usá el código fuente para compilar en esta PC.'
 fi
-printf 'PC lista. Instalá SoundShare.apk en el teléfono, autorizá la depuración USB y ejecutá ./soundshare.\n'
+printf 'PC lista. Activá y autorizá la depuración USB en el teléfono y ejecutá ./soundshare; instala la app requerida automáticamente si encuentra la APK.\n'

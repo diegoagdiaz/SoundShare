@@ -22,13 +22,15 @@ cp -- "$root/scripts/setup.sh" "$staging/SoundShare/scripts/setup.sh"
 cp -- "$root/README.md" "$staging/SoundShare/README.md"
 cp -- "$root/docs/PROTOCOLO.md" "$staging/SoundShare/docs/PROTOCOLO.md"
 cat > "$staging/SoundShare/LEEME.txt" <<'EOF'
-1. Instalá SoundShare.apk en el teléfono.
-2. Activá Depuración USB en las opciones de desarrollador del teléfono.
-3. En esta carpeta de la PC, ejecutá: ./soundshare
-4. Conectá el cable USB, aceptá la autorización y elegí el sentido en la app.
+1. Activá Depuración USB en las opciones de desarrollador del teléfono.
+2. En esta carpeta de la PC, ejecutá: ./soundshare
+3. Conectá el cable USB y aceptá la autorización de depuración e instalación si aparece.
+4. SoundShare instala automáticamente la app requerida y la abre: elegí el sentido del audio.
 
 El inicio instala adb si falta (puede pedir sudo). No necesita Rust, Java ni Android SDK.
 Para preparar las dependencias por separado: ./scripts/setup.sh
+Instalación manual: ./soundshare install [ruta.apk]
+Para desactivar la instalación automática: SOUNDSHARE_NO_AUTO_INSTALL=1 ./soundshare
 PC → Móvil directamente: ./soundshare pc2phone
 Móvil → PC directamente: ./soundshare phone2pc
 Salir: q + Enter o Ctrl+C.
