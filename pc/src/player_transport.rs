@@ -88,3 +88,56 @@ impl Write for PlayerTransport {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_only_known_transport_arguments() {
+        assert_eq!(TransportChoice::parse("aoa"), Some(TransportChoice::Aoa));
+        assert_eq!(TransportChoice::parse("adb"), Some(TransportChoice::Adb));
+        for invalid in ["", "AOA", "wifi", " adb", "adb ", "aoa extra", "adb selected"] {
+            assert_eq!(TransportChoice::parse(invalid), None, "{invalid}");
+        }
+    }
+
+    #[test]
+    fn forced_adb_wins_over_live_aoa_link() {
+        assert_eq!(advertisement(TransportChoice::Adb, true, TransportReason::Unavailable),
+                   "PLAYER_TRANSPORT adb selected");
+        assert_eq!(advertisement(TransportChoice::Adb, false, TransportReason::Disconnected),
+                   "PLAYER_TRANSPORT adb selected");
+    }
+
+    #[test]
+    fn aoa_recovery_returns_candidate_without_old_fallback_reason() {
+        assert_eq!(advertisement(TransportChoice::Aoa, false, TransportReason::Unavailable),
+                   "PLAYER_TRANSPORT adb unavailable");
+        assert_eq!(advertisement(TransportChoice::Aoa, true, TransportReason::Unavailable),
+                   "PLAYER_TRANSPORT aoa");
+    }
+
+    #[test]
+    fn missing_accessory_mode_or_device_explains_fallback() {
+        assert_eq!(advertisement(TransportChoice::Aoa, false, TransportReason::Reconnect),
+                   "PLAYER_TRANSPORT adb reconnect");
+        assert_eq!(advertisement(TransportChoice::Aoa, false, TransportReason::Disconnected),
+                   "PLAYER_TRANSPORT adb disconnected");
+    }
+
+    #[test]
+    fn control_stream_preserves_transport_requests_and_following_mode() {
+        let mut input = std::io::BufReader::with_capacity(3,
+            &b"TRANSPORT adb\nTRANSPORT aoa\r\nTRANSPORT wifi\nMODE pc2phone\n"[..]);
+        let choices: Vec<_> = (0..3).map(|_| {
+            let line = crate::protocol::read_line(&mut input).unwrap().unwrap();
+            let (cmd, arg) = line.split_once(' ').unwrap();
+            assert_eq!(cmd, "TRANSPORT");
+            TransportChoice::parse(arg)
+        }).collect();
+        assert_eq!(choices, vec![Some(TransportChoice::Adb), Some(TransportChoice::Aoa), None]);
+        assert_eq!(crate::protocol::read_line(&mut input).unwrap().as_deref(), Some("MODE pc2phone"));
+        assert_eq!(crate::protocol::read_line(&mut input).unwrap(), None);
+    }
+}

@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicInteger
 class AccessoryTransport(private val context: Context, private val onChanged: () -> Unit) {
     private val usb = context.getSystemService(UsbManager::class.java)
     // Un pedido por cable; UsbAccessory.equals() lee la serie y sin permiso lanza SecurityException.
-    private var requested = false
+    private val permissionRequests = AccessoryPermissionRequests()
     @Volatile var state = AccessoryState.UNAVAILABLE
         private set
     private fun updateState(value: AccessoryState) {
@@ -40,7 +40,7 @@ class AccessoryTransport(private val context: Context, private val onChanged: ()
                     Log.i(TAG,"permiso AOA rechazado; PLAYER sigue por adb")
                 }
                 UsbManager.ACTION_USB_ACCESSORY_DETACHED -> synchronized(this@AccessoryTransport) {
-                    release(); requested = false; failed = false
+                    release(); permissionRequests.disconnected(); failed = false
                     updateState(AccessoryState.DISCONNECTED)
                 }
             }
@@ -54,13 +54,12 @@ class AccessoryTransport(private val context: Context, private val onChanged: ()
 
     @Synchronized fun prepare(explicit: Boolean = false) {
         if (closed) return
-        if (explicit) { requested = false; failed = false }
+        if (explicit) failed = false
         if (failed || link != null) return
         val accessory = usb.accessoryList?.firstOrNull { it.manufacturer == "SoundShare" && it.model == "SoundShare" && it.version == "1" }
         if (accessory == null) { updateState(AccessoryState.UNAVAILABLE); return }
         if (!usb.hasPermission(accessory)) {
-            if (!requested) {
-                requested = true
+            if (permissionRequests.request(explicit)) {
                 updateState(AccessoryState.PERMISSION_REQUIRED)
                 // El sistema rellena los extras del resultado. Intent explícito, sólo para esta app.
                 val permission = PendingIntent.getBroadcast(context,0,Intent(PERMISSION).setPackage(context.packageName),

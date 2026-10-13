@@ -78,7 +78,19 @@ JAVA_HOME=$HOME/.gradle/jdks/jdk-21.0.12+8 \
 android/gradlew -p android testDebugUnitTest assembleDebug
 ```
 
-Rust: 22 tests. Android: 25 tests unitarios y assembleDebug exitosos. Inicio: 8 tests; AppImage: 4 tests existentes. Clippy con `--all-targets -- -D warnings` sin advertencias. `ldd` del ejecutable release sólo requiere PipeWire, libgcc y libc: libusb queda enlazada dentro del binario. CAPTURE por adb en el USB 2d01: 105472 frames PCM recibidos, inicio y salida correctos, dos eventos auxiliares fuera de la pantalla principal y recursos liberados. Se agregó el COPYING de libusb al empaquetado; no se reconstruyó el contenedor/AppImage completo.
+La verificación inicial registró 22 tests Rust y 25 tests unitarios Android, con assembleDebug exitoso. Inicio: 8 tests; AppImage: 4 tests existentes. Clippy con `--all-targets -- -D warnings` sin advertencias. `ldd` del ejecutable release sólo requiere PipeWire, libgcc y libc: libusb queda enlazada dentro del binario. CAPTURE por adb en el USB 2d01: 105472 frames PCM recibidos, inicio y salida correctos, dos eventos auxiliares fuera de la pantalla principal y recursos liberados. Se agregó el COPYING de libusb al empaquetado; no se reconstruyó el contenedor/AppImage completo.
+
+## Revisión de generaciones y selector (sin dispositivo)
+
+Sobre la base 207d656 se aplicó y descartó el stash de la ronda 2. Cada PLAYER tiene cancelación irreversible y recursos propios; detenerlo pausa/vacía su pista antes del arranque siguiente. Se conservan los sufijos de escrituras parciales con escrituras AudioTrack no bloqueantes protegidas por la generación. Lecturas, END, limpieza y publicaciones tardías no pueden tocar el arranque nuevo. En Rust los estados se validan por ID bajo el lock del Hub antes de ajustar el reloj.
+
+`Link::stop()` retira el handle USB bajo un lock exclusivo después de las transferencias pendientes (timeouts de 200/500 ms); el destructor de `DeviceHandle` libera las interfaces reclamadas. No depende de que terminen todos los `Arc<Link>` de lectores o sesiones. La reapertura está serializada y valida que el dispositivo siga vigente antes de instalar el enlace nuevo.
+
+La app muestra el transporte real de PLAYER y conserva una preferencia AOA/adb. `TRANSPORT aoa` puede reabrir el accesorio ya en 18d1:2d01, sin conmutar; `TRANSPORT adb` conserva el modo físico. La respuesta `PLAYER_TRANSPORT` incluye un motivo opcional para fallback. El detalle del selector, permisos y la decisión de no reenumerar desde CONTROL están en [PROTOCOLO.md](PROTOCOLO.md).
+
+Verificación de esta revisión: **27 tests Rust y 40 tests Android, todos exitosos**, clippy `--all-targets -- -D warnings`, `cargo build` debug y `assembleDebug` exitosos. Los tests puros cubren generaciones canceladas, cierre de cola, decisión de transporte, anuncios antiguos/nuevos, argumentos inválidos, líneas CONTROL partidas, permiso automático único y reintento explícito. Se usaron los comandos de arriba; clippy con las mismas variables de pkg-config y `--manifest-path pc/Cargo.toml`. Gradle informa deprecaciones existentes, sin fallos.
+
+No se usó el teléfono, no se ejecutó el Hub ni se reprodujo audio en esta revisión. Tampoco se reconstruyó `pc/target/release/soundshare`: el nuevo ejecutable está en `pc/target/debug/soundshare` y el APK en `android/app/build/outputs/apk/debug/app-debug.apk`. Los resultados acústicos/USB de la tabla pertenecen a las corridas anteriores, no al selector ni a las generaciones nuevas.
 
 ## Límites y verificación humana
 
