@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.widget.TextView
+import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
 
@@ -18,6 +19,9 @@ class MainActivity : Activity() {
     private lateinit var btnPcToPhone: View
     private lateinit var btnPhoneToPc: View
     private lateinit var btnStop: View
+    private lateinit var latencyCard: View
+    private lateinit var latencyValue: TextView
+    private lateinit var latencyHint: TextView
 
     private val listener: () -> Unit = { render() }
 
@@ -31,6 +35,9 @@ class MainActivity : Activity() {
         btnPcToPhone = findViewById(R.id.btnPcToPhone)
         btnPhoneToPc = findViewById(R.id.btnPhoneToPc)
         btnStop = findViewById(R.id.btnStop)
+        latencyCard = findViewById(R.id.latencyCard)
+        latencyValue = findViewById(R.id.latencyValue)
+        latencyHint = findViewById(R.id.latencyHint)
 
         // Tocar el modo activo lo apaga; tocar el otro cambia de dirección.
         btnPcToPhone.setOnClickListener { toggle(Mode.PC_TO_PHONE) }
@@ -93,6 +100,22 @@ class MainActivity : Activity() {
         }
         btnStop.visibility = if (connected && mode != Mode.OFF) View.VISIBLE else View.INVISIBLE
 
+        latencyCard.visibility = if (connected && mode != Mode.OFF) View.VISIBLE else View.GONE
+        val latency = LinkService.latencyEstimate()
+        latencyValue.text = latency.milliseconds?.let { getString(R.string.latency_value, it.roundToInt()) }
+            ?: getString(R.string.latency_measuring)
+        latencyHint.text = if (latency.missing.isEmpty()) getString(R.string.latency_complete) else {
+            val missing = latency.missing.joinToString(", ") {
+                getString(when (it) {
+                    LatencyEstimate.Missing.PC -> R.string.latency_missing_pc
+                    LatencyEstimate.Missing.CAPTURE -> R.string.latency_missing_capture
+                    LatencyEstimate.Missing.OUTPUT -> R.string.latency_missing_output
+                    LatencyEstimate.Missing.USB -> R.string.latency_missing_usb
+                })
+            }
+            getString(R.string.latency_partial, missing)
+        }
+
         val lines = mutableListOf<String>()
         LinkService.playerStats?.let { s ->
             lines += "cola        %5.1f ms  (objetivo %.1f)".format(s.queuedMs, s.targetMs)
@@ -100,7 +123,8 @@ class MainActivity : Activity() {
             lines += "cortes      %5d".format(s.underruns)
             lines += "pista       %s".format(if (s.fastTrack) "baja latencia" else "normal")
         }
-        if (LinkService.pcInfo.isNotEmpty()) lines += LinkService.pcInfo
+        // PC → Móvil ya muestra las medidas locales; el INFO antiguo trae otra cifra de latencia parcial.
+        if (mode != Mode.PC_TO_PHONE && LinkService.pcInfo.isNotEmpty()) lines += LinkService.pcInfo
         statsText.text = lines.joinToString("\n")
     }
 }

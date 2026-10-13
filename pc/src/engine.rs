@@ -23,6 +23,7 @@ use pw::stream::{StreamFlags, StreamListener, StreamRc};
 use crate::control::RateLoop;
 use crate::protocol::{Format, Sample};
 use crate::ring::Ring;
+use crate::source_target::SourceTarget;
 
 pub const SINK_NAME: &str = "soundshare_to_phone";
 const SOURCE_NAME: &str = "soundshare_from_phone";
@@ -36,10 +37,6 @@ const QUANTUM: u32 = 256;
 /// Calidad del resampler adaptativo (0-14). Solo actúa para las correcciones de reloj.
 const RESAMPLE_QUALITY: &str = "10";
 
-/// Móvil → PC: colchón inicial. El teléfono entrega la mezcla en bloques de ~21 ms.
-const SOURCE_TARGET_S: f64 = 0.026;
-const SOURCE_TARGET_STEP_S: f64 = 0.004;
-const SOURCE_TARGET_MAX_S: f64 = 0.120;
 /// Hasta medirla, suponemos el bloque típico de Android (~21 ms de pico a pico).
 const SOURCE_RIPPLE_GUESS_S: f64 = 0.021;
 
@@ -99,6 +96,8 @@ pub struct SinkShared {
     pub overruns: AtomicU32,
     /// Diagnóstico: mayor intervalo entre ciclos de PipeWire desde la última lectura (µs).
     pub max_cycle_us: AtomicU32,
+    /// Tiempo de PipeWire hasta el punto de captura, en segundos; -1 si no está disponible.
+    pub pipeline_latency: AtomicF32,
     last_cycle_ns: AtomicU64,
 }
 
@@ -121,6 +120,7 @@ impl SinkShared {
             quantum: AtomicU32::new(0),
             overruns: AtomicU32::new(0),
             max_cycle_us: AtomicU32::new(0),
+            pipeline_latency: AtomicF32(AtomicU32::new((-1.0f32).to_bits())),
             last_cycle_ns: AtomicU64::new(0),
         })
     }
@@ -140,6 +140,8 @@ pub struct SourceShared {
     pub quantum: AtomicU32,
     pub underruns: AtomicU32,
     pub overruns: AtomicU32,
+    /// Cola interna, resampler y salida de PipeWire, en segundos; -1 si no hay datos.
+    pub pipeline_latency: AtomicF32,
 }
 
 impl SourceShared {
@@ -155,6 +157,7 @@ impl SourceShared {
             quantum: AtomicU32::new(0),
             underruns: AtomicU32::new(0),
             overruns: AtomicU32::new(0),
+            pipeline_latency: AtomicF32(AtomicU32::new((-1.0f32).to_bits())),
         })
     }
 }
@@ -432,6 +435,19 @@ fn forced_rate() -> Option<f64> {
     std::env::var("SOUNDSHARE_FORCE_RATE").ok().and_then(|v| v.parse().ok())
 }
 
+/// Snapshot de tiempo real: sin locks ni reservas. Los buffers propios se cuentan aparte.
+fn pipeline_latency(stream: &pw::stream::Stream, sample_rate: u32, capture: bool) -> f32 {
+    let Ok(time) = stream.time() else { return -1.0 };
+    let rate = time.rate();
+    if time.now() <= 0 || rate.num == 0 || rate.denom == 0 { return -1.0; }
+    let elapsed = now_ns().saturating_sub(time.now() as u64) as f64 / 1e9;
+    let delay = time.delay() as f64 * rate.num as f64 / rate.denom as f64;
+    let device = (delay + if capture { elapsed } else { -elapsed }).max(0.0);
+    let buffered = time.buffered().saturating_add(time.queued()) as f64 / sample_rate as f64;
+    let latency = device + buffered;
+    if latency.is_finite() && (0.0..=5.0).contains(&latency) { latency as f32 } else { -1.0 }
+}
+
 // ---------------------------------------------------------------- PC → Móvil
 
 struct SinkData {
@@ -493,6 +509,7 @@ fn create_sink(core: &pw::core::CoreRc, shared: Arc<SinkShared>, errors: &mpsc::
 fn sink_process(stream: &pw::stream::Stream, d: &mut SinkData) {
     let frame = SINK_FORMAT.frame_bytes();
     let now = now_ns();
+    d.shared.pipeline_latency.store(pipeline_latency(stream, SINK_FORMAT.rate, true));
     let prev = d.shared.last_cycle_ns.swap(now, Ordering::Relaxed);
     if prev != 0 {
         d.shared.max_cycle_us.fetch_max(((now - prev) / 1000) as u32, Ordering::Relaxed);
@@ -527,8 +544,8 @@ struct SourceData {
     forced_rate: Option<f64>,
     control: RateLoop,
     started: bool,
-    /// Nivel promedio buscado (s).
-    target: f64,
+    /// Nivel promedio buscado, con recuperación lenta después de los cortes.
+    target: SourceTarget,
     /// Amplitud del "serrucho" del buffer (s): el teléfono entrega en bloques.
     ripple: f64,
     win_min: usize,
@@ -568,7 +585,7 @@ fn create_source(
         forced_rate: forced_rate(),
         control: RateLoop::new(LOOP_BANDWIDTH_HZ, LOOP_MAX_PPM, LOOP_SMOOTHING_S),
         started: false,
-        target: SOURCE_TARGET_S,
+        target: SourceTarget::new(fmt.rate),
         ripple: SOURCE_RIPPLE_GUESS_S,
         win_min: usize::MAX,
         win_max: 0,
@@ -605,6 +622,7 @@ fn create_source(
 
 /// Hilo de tiempo real: entrega a PipeWire exactamente lo que pide el resampler.
 fn source_process(stream: &pw::stream::Stream, d: &mut SourceData) {
+    d.shared.pipeline_latency.store(pipeline_latency(stream, d.shared.format.rate, false));
     let Some(mut buffer) = stream.dequeue_buffer() else { return };
     let requested = buffer.requested() as usize;
     let Some(data) = buffer.datas_mut().first_mut() else { return };
@@ -635,33 +653,39 @@ fn source_process(stream: &pw::stream::Stream, d: &mut SourceData) {
     }
     // Llenando justo después de que llegó un bloque, el promedio queda media amplitud abajo:
     // arrancamos ahí para que el promedio caiga en el objetivo y el lazo no tenga nada que corregir.
-    let start_level = ((d.target + d.ripple / 2.0) * rate) as usize;
+    let target = d.target.seconds();
+    let start_level = ((target + d.ripple / 2.0) * rate) as usize;
 
     // Si tras un tirón del USB llegó mucho de golpe, saltamos al punto de arranque: mejor un
     // salto corto que quedarse con latencia de más.
-    if avail as f64 > (d.target + d.ripple + 0.100) * rate {
+    if avail as f64 > (target + d.ripple + 0.100) * rate {
         ring.skip((avail - start_level) * frame);
         avail = start_level;
-        d.control.prime(d.target);
+        d.control.prime(target);
+        d.target.reset_stability();
     }
     if !d.started && avail >= start_level {
         // Lo que se juntó mientras arrancaba el stream sobra (el lazo es lento y tardaría en drenarlo).
         ring.skip((avail - start_level) * frame);
         avail = start_level;
         d.started = true;
-        d.control.prime(d.target);
+        d.control.prime(target);
     }
     let mut got = 0;
     if d.started {
-        dev = d.control.update(avail as f64 / rate, d.target, n as f64 / rate);
+        dev = d.control.update(avail as f64 / rate, target, n as f64 / rate);
         got = ring.pop(out) / frame;
         if got < n {
             // Corte: rellenamos con silencio, agrandamos el colchón y volvemos a llenarlo.
             // La ventana del serrucho se descarta: incluye la caída y no representa nada.
             d.started = false;
             (d.win_min, d.win_max, d.win_frames) = (usize::MAX, 0, 0);
-            d.target = (d.target + SOURCE_TARGET_STEP_S).min(SOURCE_TARGET_MAX_S);
+            d.target.on_underrun();
             d.shared.underruns.fetch_add(1, Ordering::Relaxed);
+        } else {
+            // Solo baja después de un minuto completo con margen; el lazo drena
+            // el exceso lentamente y no agregamos descartes al recuperar latencia.
+            d.target.on_playback(n, avail.saturating_sub(n));
         }
     }
     out[got * frame..].fill(0);
@@ -674,7 +698,7 @@ fn source_process(stream: &pw::stream::Stream, d: &mut SourceData) {
     d.shared.frames.fetch_add(n as u64, Ordering::Relaxed);
     d.shared.quantum.store(n as u32, Ordering::Relaxed);
     d.shared.level.store(d.control.level().unwrap_or(avail as f64 / rate) as f32);
-    d.shared.target.store(d.target as f32);
+    d.shared.target.store(d.target.seconds() as f32);
     d.shared.rate_dev.store(dev as f32);
     // Del lado de reproducción, rate > 1 hace que el resampler consuma menos frames nuestros
     // (medido: 1,01 → 47 520 frames/s). Si sobra audio en el buffer, pedimos que consuma más.

@@ -6,6 +6,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTimestamp
 import android.media.AudioTrack
+import android.os.Build
 import android.os.Process
 import android.os.SystemClock
 import android.util.Log
@@ -32,11 +33,14 @@ class Player(private val context: Context, private val onStats: (Stats) -> Unit)
         val outputLatencyFrames: Int,
         val underruns: Int,
         val fastTrack: Boolean,
+        val socketFrames: Int = 0,
+        val measuredAtNs: Long = System.nanoTime(),
     ) {
         private fun ms(frames: Int) = frames * 1000f / sampleRate
         val targetMs get() = ms(targetFrames)
         val queuedMs get() = ms(queuedFrames)
         val outputLatencyMs get() = ms(outputLatencyFrames)
+        val socketMs get() = ms(socketFrames)
     }
 
     @Volatile private var running = false
@@ -121,7 +125,12 @@ class Player(private val context: Context, private val onStats: (Stats) -> Unit)
         val target = QueueTarget(burst, fmt.sampleRate, capacity / 2, (initialMs * fmt.sampleRate / 1000).toInt())
         fun applyTarget() {
             // El umbral de escritura queda por encima del objetivo: write() casi nunca bloquea.
-            track.bufferSizeInFrames = (target.frames + 2 * burst).coerceAtMost(capacity)
+            val bufferFrames = track.setBufferSizeInFrames((target.frames + 2 * burst).coerceAtMost(capacity))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                // Arrancar al reunir el objetivo, sin esperar también el margen de escritura.
+                val actualBufferFrames = if (bufferFrames > 0) bufferFrames else track.bufferSizeInFrames
+                track.setStartThresholdInFrames(minOf(target.frames, actualBufferFrames).coerceAtLeast(1))
+            }
         }
         applyTarget()
         Log.i(TAG, "pista: ${fmt.sampleRate} Hz, burst $burst, capacidad $capacity, rápida=$fast, objetivo ${target.frames}")
@@ -226,7 +235,12 @@ class Player(private val context: Context, private val onStats: (Stats) -> Unit)
                 var outputLatency = -1
                 if (started && track.getTimestamp(ts)) {
                     val presented = ts.framePosition + (System.nanoTime() - ts.nanoTime) * fmt.sampleRate / 1_000_000_000L
-                    outputLatency = (framesWritten - presented).toInt()
+                    val pending = framesWritten - presented
+                    val timestampAge = System.nanoTime() - ts.nanoTime
+                    if (ts.nanoTime > 0 && timestampAge in 0..1_000_000_000L
+                        && presented >= 0 && pending in 0..Int.MAX_VALUE.toLong()) {
+                        outputLatency = pending.toInt()
+                    }
                 }
 
                 if (DIAG) {
@@ -243,7 +257,7 @@ class Player(private val context: Context, private val onStats: (Stats) -> Unit)
 
                 if (now - lastUi > UI_PERIOD_NS) {
                     lastUi = now
-                    onStats(Stats(fmt.sampleRate, target.frames, queued, outputLatency, underruns, fast))
+                    onStats(Stats(fmt.sampleRate, target.frames, queued, outputLatency, underruns, fast, inSocket))
                 }
             }
         } finally {

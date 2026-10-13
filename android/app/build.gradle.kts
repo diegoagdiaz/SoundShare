@@ -2,6 +2,10 @@ plugins {
     id("com.android.application")
 }
 
+dependencies {
+    testImplementation("junit:junit:4.13.2")
+}
+
 android {
     namespace = "com.soundshare"
     compileSdk = 36
@@ -11,8 +15,8 @@ android {
         // AudioTrack con modo de baja latencia existe desde Android 8.
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.2.0"
     }
 
     buildTypes {

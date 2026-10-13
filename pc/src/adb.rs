@@ -144,7 +144,7 @@ impl Adb {
 
     /// Lanza el capturador con permisos de shell. Su salida estándar son mensajes de estado.
     pub fn spawn_capture(&self, serial: &str, apk_path: &str, port: u16) -> io::Result<Child> {
-        let remote = format!("CLASSPATH={apk_path} app_process / {CAPTURE_CLASS} --port {port}");
+        let remote = format!("CLASSPATH={apk_path} app_process / {CAPTURE_CLASS} --port {port} --latency");
         self.cmd(Some(serial))
             .args(["shell", &remote])
             .stdout(Stdio::piped())

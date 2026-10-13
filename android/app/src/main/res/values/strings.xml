@@ -6,6 +6,15 @@
     <string name="phone_to_pc">Móvil → PC</string>
     <string name="phone_to_pc_hint">El audio del teléfono suena en la PC</string>
     <string name="stop">Detener</string>
+    <string name="latency_title">Latencia estimada del enlace</string>
+    <string name="latency_value">≈ %1$d ms</string>
+    <string name="latency_measuring">Midiendo…</string>
+    <string name="latency_complete">Incluye captura, buffers, salida de audio y USB aproximado.</string>
+    <string name="latency_partial">Estimación parcial: faltan datos de %1$s.</string>
+    <string name="latency_missing_pc">la PC</string>
+    <string name="latency_missing_capture">captura</string>
+    <string name="latency_missing_output">salida de audio</string>
+    <string name="latency_missing_usb">USB</string>
     <string name="status_waiting">Esperando a la PC…</string>
     <string name="status_waiting_hint">Conectá el cable USB y ejecutá «./soundshare» en la PC. La primera vez, activá Depuración USB en las opciones de desarrollador y aceptá la autorización.</string>
     <string name="status_connected">Conectado a la PC</string>

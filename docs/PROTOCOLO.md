@@ -86,6 +86,20 @@ App Android                         PC / Hub
 
 Cerrar el último CONTROL durante PC → Móvil apaga el modo y restaura la salida de la PC. En Móvil → PC, cerrar CONTROL por sí solo no implica detener el capturador de shell. La acción **Salir** de la notificación envía `MODE off` y espera hasta 500 ms por `STATE off` antes de cerrar el servicio. Desconectar el dispositivo USB apaga el modo. Durante el apagado de la PC se rechazan nuevos pedidos y conexiones; el motor no admite inicios de streams después de `Quit`.
 
+### Telemetría opcional de latencia
+
+El protocolo 1 conserva el hello, formato, PCM y estado PLAYER originales. Agrega líneas opcionales de CONTROL; los clientes anteriores las ignoran:
+
+- `PING <token>`: Android envía su tiempo monótono en ns justo al escribir la línea, hasta una vez por segundo mientras hay audio.
+- `PONG <token>`: la PC responde exclusivamente al cliente que mandó ese token. Android acepta solo la respuesta pendiente y estima USB como la mitad del round trip; no compara relojes de dispositivos diferentes.
+- `LATENCY <modo> <cola_pc_ms> <pipewire_ms> <captura_android_ms>`: la PC informa valores decimales con punto cada segundo. `-1` significa desconocido. `pipewire_ms` incluye el tiempo hasta el dispositivo/grafo y el buffer del resampler; en PC → Móvil se usa al menos el cuántum observado. El tiempo de captura Android solo corresponde a Móvil → PC.
+
+La PC lanza el capturador con `--latency`. Cada 250 ms este informa por stdout `[captura] LATENCY <ms>`, calculado con `AudioRecord.getTimestamp(TIMEBASE_MONOTONIC)` y la posición del punto medio del bloque leído. No mezcla esta telemetría con el PCM. El Hub acepta esos datos solo del proceso de captura vigente y vence la medición tras 3 s.
+
+La app muestra una estimación por etapas. En PC → Móvil suma cola/grafo PC + tiempo de AudioTrack hasta salida + frames pendientes en el socket + USB aproximado. AudioTrack ya incluye su propia cola, que no se suma dos veces. Si no hay timestamp de salida, usa la cola como parte conocida y marca la salida desconocida. En Móvil → PC suma captura Android + promedio del ring PC + resampler/grafo/salida PC + USB aproximado. Los datos CONTROL/PONG vencen en 3 s; los del reproductor en 1,5 s. Cambiar de modo o desconectarse limpia la telemetría de la sesión anterior. No se deriva ninguna cifra del texto `INFO`.
+
+Esta estimación no es una medición acústica de extremo a extremo ni incluye los buffers de la aplicación original. La simetría del USB y los timestamps/reportes de los dispositivos tienen límites. Las etapas sin datos se identifican explícitamente como una estimación parcial, sin completar con constantes supuestas.
+
 ## PLAYER: PC → Móvil
 
 Solo se acepta cuando la PC está en `pc2phone` y tiene un sink. Un nuevo PLAYER reemplaza al anterior. La PC envía formato y luego PCM sin cabeceras hasta cerrar el socket. En paralelo, el teléfono envía bloques de estado de 16 bytes; el primero no necesita esperar a que se complete un bloque PCM específico.
@@ -113,6 +127,8 @@ App / Player                        PC / Hub + PipeWire
 
 El sink virtual pide 256 frames (5,3 ms a 48 kHz), usa `node.always-process` y entrega los datos a un ring; otro hilo los manda por TCP. Android solicita AudioTrack de baja latencia y conserva el sufijo de cada escritura parcial hasta entregarlo completo. Su objetivo cubre el peor hueco reciente del túnel más un burst, con mínimo de dos bursts, una ventana de 30 s y límite de media capacidad de la pista. Sube enseguida, baja un burst cada 20 s y agrega un piso ante cortes que decae un burst cada 30 s. Ignora huecos/cortes iniciales para ese aprendizaje durante 700 ms tras iniciar la reproducción. El objetivo final se persiste en SharedPreferences por frecuencia de muestreo; un teléfono nuevo arranca con 30 ms.
 
+El buffer de escritura se ajusta a objetivo + dos bursts, limitado por la capacidad de la pista. En Android 12+ se fija además el umbral de inicio en el objetivo, limitado por el tamaño efectivo devuelto por AudioTrack, para evitar esperar también el margen de escritura. En Android 8–11 se conserva el umbral del sistema. Los descensos del objetivo y del piso respetan sus límites incluso cuando el valor aprendido no es múltiplo de un burst.
+
 Si la cola supera `objetivo + max(objetivo, 50 ms)`, programa el descarte de `cola - objetivo` frames entrantes. No vacía de inmediato AudioTrack: omite las siguientes muestras recibidas hasta consumir ese exceso.
 
 ## CAPTURE: Móvil → PC
@@ -137,11 +153,13 @@ Capturador Android                   PC / Hub + PipeWire
     |-- detiene y libera AudioRecord  |
 ```
 
-REMOTE_SUBMIX captura la mezcla de medios y desvía su salida del parlante. Si Android exige una actividad visible para el shell, incluso si lanza una excepción al construir AudioRecord, el capturador abre `com.android.shell/.HeapDumpActivity` un instante y luego intenta cerrar sus tareas. Usa `am stack` en Android 11; si no encuentra tareas o falla, abre `com.soundshare/.MainActivity` para taparla, con `KEYCODE_HOME` como último recurso. Sus comandos leen la salida en paralelo y tienen un timeout de 5 s. La compatibilidad de captura en Android 12+ todavía necesita prueba real. Intenta elevar el volumen de medios del dispositivo virtual activo al máximo mediante `cmd media_session volume`; no transporta comandos de volumen por este protocolo.
+REMOTE_SUBMIX captura la mezcla de medios y desvía su salida del parlante. Android 11 puede exigir que el UID del shell tenga una actividad visible para iniciar AudioRecord. Si falla el intento directo, el capturador crea una pantalla virtual privada con superficie local, sin espejo de la pantalla física, y lanza `com.android.shell/.HeapDumpActivity` exclusivamente allí, con una tarea nueva. Una vez iniciado AudioRecord, libera esa pantalla, su actividad y la superficie; el mismo cierre se ejecuta si falla el arranque. No usa `am stack remove`, no cierra tareas ajenas ni abre ventanas en la pantalla principal como alternativa. Sus comandos leen la salida en paralelo y tienen un timeout de 5 s. Si el sistema no permite el arranque en pantalla secundaria, reporta el error sin recurrir a una ventana física. Android 12+ conserva el arranque directo; `ShellIdentity` mantiene la atribución de API 31+ y el dispositivo real de API 34+, verificado previamente en Android 16. Intenta elevar el volumen de medios del dispositivo virtual activo al máximo mediante `cmd media_session volume`; no transporta comandos de volumen por este protocolo.
 
 La PC reproduce con el stream `SoundShare (Móvil)`. `-o/--output SALIDA` o `SOUNDSHARE_OUTPUT` eligen su `node.name`; sin ambos usa la salida por defecto, y una salida explícita no tiene fallback. `SOUNDSHARE_DUMP=archivo` vuelca el PCM recibido antes del resampler, sin cabecera ni modificación del protocolo.
 
-El objetivo promedio inicial del ring es 26 ms. Arranca cuando reúne objetivo + medio «serrucho» de los bloques recibidos: la amplitud se estima inicialmente en 21 ms, se mide en ventanas de 1 s, se suaviza y se acota a 5–60 ms. El arranque descarta el exceso hasta ese nivel y prepara el filtro del lazo en el objetivo con `RateLoop::prime()`. Cada underrun rellena con silencio, aumenta el objetivo 4 ms (máximo 120 ms) y espera volver a llenar. Ese objetivo no baja durante la sesión. Si el ring supera objetivo + serrucho + 100 ms, descarta hasta el punto de arranque y vuelve a preparar el filtro.
+El capturador espera un frame completo con `READ_BLOCKING` y drena los frames ya disponibles con `READ_NON_BLOCKING`, hasta 1024 frames por escritura TCP. No espera a completar ese máximo ni retiene el resto parcial de un bloque del submix hasta su siguiente entrega. Si la lectura no bloqueante falla después de leer el primer frame, envía lo leído y reporta el error en la siguiente iteración.
+
+El objetivo promedio inicial del ring es 26 ms. Arranca cuando reúne objetivo + medio «serrucho» de los bloques recibidos: la amplitud se estima inicialmente en 21 ms, se mide en ventanas de 1 s, se suaviza y se acota a 5–60 ms. El arranque descarta el exceso hasta ese nivel y prepara el filtro del lazo en el objetivo con `RateLoop::prime()`. Cada underrun rellena con silencio, aumenta el objetivo 4 ms (máximo 120 ms) y espera volver a llenar. `SourceTarget` baja 4 ms hacia el mínimo de 26 ms tras 60 s de ciclos completos con una cola restante de al menos 4 ms más otro ciclo. Cuenta frames reproducidos según la frecuencia del formato; no cuenta el llenado. Los cortes, la falta de margen y los descartes por acumulación reinician el período estable. La recuperación reduce solo el objetivo: el PI drena el exceso gradualmente, sin saltar muestras. Si el ring supera objetivo + serrucho + 100 ms, descarta hasta el punto de arranque, vuelve a preparar el filtro y reinicia la espera de recuperación.
 
 ## Compatibilidad
 

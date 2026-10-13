@@ -3,11 +3,13 @@ package com.soundshare.capture
 import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
+import android.media.AudioTimestamp
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.Looper
 import android.os.Process
 import com.soundshare.Protocol
+import com.soundshare.LatencyEstimate
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -28,7 +30,7 @@ object CaptureMain {
     private const val RATE = 48000
     private const val CHANNELS = 2
     private const val FRAME_BYTES = CHANNELS * 2
-    private const val CHUNK_FRAMES = 240
+    private const val CHUNK_FRAMES = 1024
 
     @Volatile private var stopped = false
 
@@ -37,17 +39,19 @@ object CaptureMain {
         var port = Protocol.PORT
         var keepVolume = false
         var debug = false
+        var latency = false
         var i = 0
         while (i < args.size) {
             when (args[i]) {
                 "--port" -> port = args[++i].toInt()
                 "--keep-volume" -> keepVolume = true
                 "--debug" -> debug = true
+                "--latency" -> latency = true
             }
             i++
         }
         val code = try {
-            run(port, keepVolume, debug)
+            run(port, keepVolume, debug, latency)
             0
         } catch (e: Throwable) {
             log("error: $e")
@@ -58,8 +62,11 @@ object CaptureMain {
     }
 
     @SuppressLint("MissingPermission")
-    private fun run(port: Int, keepVolume: Boolean, debug: Boolean) {
+    private fun run(port: Int, keepVolume: Boolean, debug: Boolean, latency: Boolean) {
         if (Looper.getMainLooper() == null) Looper.prepareMainLooper()
+        // En Android 11 su inicialización consulta recursos del contexto real del sistema.
+        // Cargarlo antes de instalar el contexto mínimo del capturador evita esa consulta tardía.
+        if (Build.VERSION.SDK_INT == Build.VERSION_CODES.R) Class.forName("android.app.AppOpsManager")
         ShellIdentity.install()
 
         // Primero la PC: si no está escuchando no tiene sentido desviar el audio del teléfono.
@@ -86,7 +93,7 @@ object CaptureMain {
             }.apply { isDaemon = true }.start()
 
             runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO) }
-            pump(rec, out, debug)
+            pump(rec, out, debug, latency)
         } finally {
             runCatching { rec.stop() }
             rec.release()
@@ -95,19 +102,42 @@ object CaptureMain {
         }
     }
 
-    private fun pump(rec: AudioRecord, out: java.io.OutputStream, debug: Boolean) {
+    private fun pump(rec: AudioRecord, out: java.io.OutputStream, debug: Boolean, latency: Boolean) {
         val chunk = ByteArray(CHUNK_FRAMES * FRAME_BYTES)
+        // REMOTE_SUBMIX suele entregar 1024 frames juntos. Pedir siempre 240 bloqueantes
+        // retiene el resto hasta la siguiente entrega; esperamos solo un frame y drenamos
+        // lo que ya llegó. La capacidad limita cada escritura, sin agregar espera.
+        val reader = PcmReader(FRAME_BYTES) { into, offset, size, blocking ->
+            rec.read(into, offset, size,
+                if (blocking) AudioRecord.READ_BLOCKING else AudioRecord.READ_NON_BLOCKING)
+        }
         var reads = 0
         var maxGapNs = 0L
         var last = System.nanoTime()
         var window = last
+        val timestamp = AudioTimestamp()
+        var framesRead = 0L
+        var lastLatency = 0L
         while (!stopped) {
-            val n = rec.read(chunk, 0, chunk.size)
+            val n = reader.readInto(chunk)
             if (n < 0) {
                 if (stopped) break
                 throw IOException("AudioRecord.read = $n")
             }
             if (n == 0) continue
+            framesRead += n / FRAME_BYTES
+            val now = System.nanoTime()
+            if (latency && now - lastLatency >= 250_000_000L) {
+                lastLatency = now
+                val age = runCatching {
+                    if (rec.getTimestamp(timestamp, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS)
+                        // Edad del punto medio del bloque, no solo de su último frame recién llegado.
+                        LatencyEstimate.captureAgeMs(RATE, framesRead - n / FRAME_BYTES / 2,
+                            timestamp.framePosition, timestamp.nanoTime, System.nanoTime())
+                    else null
+                }.getOrNull()
+                log("LATENCY ${age ?: -1.0}")
+            }
             try {
                 out.write(chunk, 0, n)
             } catch (e: IOException) {
@@ -129,29 +159,21 @@ object CaptureMain {
     }
 
     /**
-     * Android 11 solo deja grabar al uid del shell mientras tiene una actividad visible (según el momento,
-     * rechaza al crear el grabador o al arrancarlo). Si pasa, abrimos un instante una actividad propia del
-     * shell, arrancamos la captura y la cerramos: una vez en marcha, la captura sigue sin ella.
+     * Android 11 necesita una actividad del shell para habilitar la captura. Si el primer intento falla,
+     * la iniciamos en un display privado fuera de pantalla y lo liberamos al arrancar el grabador.
      */
     @SuppressLint("MissingPermission")
     private fun openRecorder(): AudioRecord {
         try {
             return createAndStartRecorder()
         } catch (e: Exception) {
-            // El recurso de la actividad visible solo corresponde a Android 11.
-            // Un fallo de inicialización en otra versión no se arregla mostrando HeapDumpActivity.
+            // El arranque auxiliar solo corresponde a Android 11.
             if (Build.VERSION.SDK_INT != Build.VERSION_CODES.R) throw e
             log("no se pudo iniciar el grabador: $e")
         }
 
-        log("Android pide una actividad visible para grabar; abriendo una un instante")
-        try {
-            exec("am", "start", "-W", "-n", "${ShellIdentity.PACKAGE}/.HeapDumpActivity")
-            return createAndStartRecorder()
-        } finally {
-            // Terminamos la limpieza antes de que main pueda llamar exitProcess tras un error.
-            closeShellTasks()
-        }
+        log("preparando la captura de Android 11 fuera de pantalla")
+        return Android11CaptureBootstrap.open(::createAndStartRecorder) { command -> exec(*command) }
     }
 
     @SuppressLint("MissingPermission")
@@ -178,26 +200,6 @@ object CaptureMain {
             rec.release()
             throw e
         }
-    }
-
-    private fun closeShellTasks() {
-        val removed = runCatching {
-            val list = exec("am", "stack", "list")
-            val re = Regex("""taskId=(\d+): ${Regex.escape(ShellIdentity.PACKAGE)}/""")
-            val tasks = re.findAll(list).toList()
-            for (m in tasks) {
-                val result = exec("am", "stack", "remove", m.groupValues[1])
-                check(!result.contains("Error", ignoreCase = true))
-            }
-            tasks.isNotEmpty()
-        }.getOrDefault(false)
-        if (removed) return
-        // Si el sistema no permite quitar la tarea, volvemos a nuestra app.
-        val covered = runCatching {
-            val result = exec("am", "start", "-n", "com.soundshare/.MainActivity")
-            check(!result.contains("Error", ignoreCase = true))
-        }.isSuccess
-        if (!covered) runCatching { exec("input", "keyevent", "KEYCODE_HOME") }
     }
 
     /**
