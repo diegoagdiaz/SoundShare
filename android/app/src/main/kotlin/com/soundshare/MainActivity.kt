@@ -2,6 +2,8 @@ package com.soundshare
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
+import android.hardware.usb.UsbManager
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.os.Build
@@ -22,6 +24,10 @@ class MainActivity : Activity() {
     private lateinit var latencyCard: View
     private lateinit var latencyValue: TextView
     private lateinit var latencyHint: TextView
+    private lateinit var transportValue: TextView
+    private lateinit var transportHint: TextView
+    private lateinit var btnTransportAoa: TextView
+    private lateinit var btnTransportAdb: TextView
 
     private val listener: () -> Unit = { render() }
 
@@ -38,6 +44,12 @@ class MainActivity : Activity() {
         latencyCard = findViewById(R.id.latencyCard)
         latencyValue = findViewById(R.id.latencyValue)
         latencyHint = findViewById(R.id.latencyHint)
+        transportValue = findViewById(R.id.transportValue)
+        transportHint = findViewById(R.id.transportHint)
+        btnTransportAoa = findViewById(R.id.btnTransportAoa)
+        btnTransportAdb = findViewById(R.id.btnTransportAdb)
+        btnTransportAoa.setOnClickListener { LinkService.requestTransport(this, TransportChoice.AOA) }
+        btnTransportAdb.setOnClickListener { LinkService.requestTransport(this, TransportChoice.ADB) }
 
         // Tocar el modo activo lo apaga; tocar el otro cambia de dirección.
         btnPcToPhone.setOnClickListener { toggle(Mode.PC_TO_PHONE) }
@@ -50,6 +62,12 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
         LinkService.start(this)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == UsbManager.ACTION_USB_ACCESSORY_ATTACHED) LinkService.accessoryAttached()
     }
 
     override fun onStart() {
@@ -114,6 +132,35 @@ class MainActivity : Activity() {
                 })
             }
             getString(R.string.latency_partial, missing)
+        }
+
+        val preference = LinkService.transportPreference
+        val playing = connected && mode == Mode.PC_TO_PHONE
+        val actual = LinkService.playerStats?.transportName?.takeIf { playing }
+        transportValue.text = when {
+            !playing -> getString(R.string.transport_inactive)
+            actual != null -> getString(R.string.transport_actual, if (actual == "aoa") "AOA" else "adb")
+            else -> getString(R.string.transport_connecting)
+        }
+        val hint = TransportSelection.hint(preference, LinkService.playerCandidate,
+            LinkService.accessoryState, connected, playing, actual)
+        transportHint.text = getString(when (hint) {
+            TransportSelection.Hint.WAITING -> R.string.transport_hint_waiting
+            TransportSelection.Hint.IDLE -> R.string.transport_hint_idle
+            TransportSelection.Hint.CONNECTING -> R.string.transport_hint_connecting
+            TransportSelection.Hint.ACTIVE -> R.string.transport_hint_active
+            TransportSelection.Hint.SELECTED_ADB -> R.string.transport_hint_adb
+            TransportSelection.Hint.PERMISSION_REQUIRED -> R.string.transport_hint_permission
+            TransportSelection.Hint.PERMISSION_DENIED -> R.string.transport_hint_denied
+            TransportSelection.Hint.UNAVAILABLE -> R.string.transport_hint_unavailable
+            TransportSelection.Hint.FAILED -> R.string.transport_hint_failed
+            TransportSelection.Hint.DISCONNECTED -> R.string.transport_hint_disconnected
+            TransportSelection.Hint.RECONNECT -> R.string.transport_hint_reconnect
+        })
+        for ((view, choice) in listOf(btnTransportAoa to TransportChoice.AOA, btnTransportAdb to TransportChoice.ADB)) {
+            view.isSelected = preference == choice
+            view.setBackgroundResource(if (view.isSelected) R.drawable.card_active else R.drawable.card)
+            view.contentDescription = if (view.isSelected) getString(R.string.transport_selected, view.text) else view.text
         }
 
         val lines = mutableListOf<String>()

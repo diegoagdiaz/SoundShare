@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::adb::{Adb, Device};
+use crate::player_transport::{self, PlayerTransport, TransportChoice, TransportReason};
 use crate::control::RateLoop;
 use crate::engine::{self, Cmd, Engine, SINK_FORMAT, SinkShared, SourceShared};
 use crate::protocol::{self, Format, Mode, PlayerStatus, Role};
@@ -23,6 +24,7 @@ pub struct Hub {
     /// Salida de PipeWire para Móvil → PC (None = la de por defecto).
     output: Option<String>,
     st: Mutex<State>,
+    aoa_open: Mutex<()>,
     next_id: AtomicU64,
     /// Último estado del reproductor del teléfono (para estadísticas).
     phone: PhoneStats,
@@ -46,12 +48,13 @@ struct State {
     device: Option<Device>,
     controls: Vec<(u64, TcpStream)>,
     sink: Option<Arc<SinkShared>>,
-    player: Option<(u64, TcpStream)>,
+    player: Option<(u64, PlayerTransport)>,
     source: Option<Arc<SourceShared>>,
     capture: Option<TcpStream>,
     capture_child: Option<(u64, Child)>,
     capture_launch: Option<u64>,
     show_stats: bool,
+    aoa: Option<Arc<crate::aoa::Link>>,
     /// Edad del último PCM leído en Android, antes de enviarlo por USB.
     capture_latency_ms: Option<(f64, Instant)>,
 }
@@ -64,6 +67,7 @@ impl Hub {
             port,
             output,
             st: Mutex::new(State { show_stats: true, ..State::default() }),
+            aoa_open: Mutex::new(()),
             next_id: AtomicU64::new(1),
             phone: PhoneStats::default(),
             max_send_us: AtomicU32::new(0),
@@ -127,7 +131,7 @@ impl Hub {
                 self.engine.send(Cmd::StopSink);
                 st.sink = None;
                 if let Some((_, s)) = st.player.take() {
-                    let _ = s.shutdown(Shutdown::Both);
+                    s.close();
                 }
             }
             Mode::PhoneToPc => {
@@ -241,6 +245,58 @@ impl Hub {
 
     // ------------------------------------------------------------ teléfono
 
+    pub fn set_aoa(&self, link: Option<Arc<crate::aoa::Link>>) {
+        let mut st = self.st.lock().unwrap();
+        if let Some(old) = st.aoa.take() { old.stop(); }
+        st.aoa = link;
+    }
+
+    /// Si la app cerró su lado del accesorio (se reinició o se reinstaló), el cable sigue en modo
+    /// AOA: reabrimos la interfaz sin conmutar para que PLAYER no se quede en adb.
+    fn reopen_aoa(self: &Arc<Self>, explicit: bool) -> TransportReason {
+        let _opening = self.aoa_open.lock().unwrap();
+        let serial = {
+            let mut st = self.st.lock().unwrap();
+            if st.shutting_down { return TransportReason::Disconnected; }
+            if st.aoa.as_ref().is_some_and(|a| a.alive()) { return TransportReason::Unavailable; }
+            let Some(serial) = st.device.as_ref().map(|d| d.serial.clone()) else { return TransportReason::Disconnected };
+            if st.aoa.is_none() && !explicit { return TransportReason::Unavailable; }
+            // stop libera el handle aunque el lector o sesiones conserven Arc<Link>.
+            if let Some(old) = st.aoa.take() { old.stop(); }
+            serial
+        };
+        match crate::aoa::reopen(&serial) {
+            Ok(link) => {
+                let mut st = self.st.lock().unwrap();
+                if st.shutting_down || st.device.as_ref().map(|d| &d.serial) != Some(&serial) {
+                    link.stop();
+                    return TransportReason::Disconnected;
+                }
+                println!("  AOA: accesorio reabierto sin conmutar USB.");
+                st.aoa = Some(link.clone());
+                drop(st);
+                link.run(Arc::downgrade(self));
+                TransportReason::Unavailable // Sólo se usa si el enlace deja de estar vivo.
+            }
+            Err(e) => {
+                eprintln!("⚠ No pude reabrir AOA: {e}. PLAYER por adb.");
+                if e.kind() == ErrorKind::Unsupported { TransportReason::Reconnect }
+                else { TransportReason::Unavailable }
+            }
+        }
+    }
+
+    fn request_transport(self: &Arc<Self>, id: u64, choice: TransportChoice) {
+        let reason = if choice == TransportChoice::Aoa { self.reopen_aoa(true) }
+            else { TransportReason::Unavailable };
+        let mut st = self.st.lock().unwrap();
+        let line = player_transport::advertisement(choice, st.aoa.as_ref().is_some_and(|a| a.alive()), reason);
+        // Responder al solicitante; no cambiar modo/sink ni cerrar el accesorio al elegir adb.
+        if let Some((_, writer)) = st.controls.iter_mut().find(|(cid, _)| *cid == id) {
+            let _ = writer.write_all(format!("{line}\n").as_bytes());
+        }
+    }
+
     pub fn device_changed(self: &Arc<Self>, device: Option<Device>) {
         let mut st = self.st.lock().unwrap();
         if st.shutting_down { return; }
@@ -268,7 +324,7 @@ impl Hub {
         }
         match role {
             Role::Control => self.handle_control(sock),
-            Role::Player => self.handle_player(sock),
+            Role::Player => self.handle_player(PlayerTransport::Adb(sock)),
             Role::Capture => self.handle_capture(sock),
         }
     }
@@ -277,10 +333,17 @@ impl Hub {
         let id = self.id();
         let Ok(writer) = sock.try_clone() else { return };
         let _ = writer.set_write_timeout(Some(Duration::from_secs(1)));
+        let reason = self.reopen_aoa(false);
         {
             let mut st = self.st.lock().unwrap();
             if st.shutting_down { return; }
             st.controls.push((id, writer));
+            let line = player_transport::advertisement(TransportChoice::Aoa,
+                st.aoa.as_ref().is_some_and(|a| a.alive()), reason);
+            // El anuncio inicial va sólo a esta app, para no pisar el selector de otro CONTROL.
+            if let Some((_, writer)) = st.controls.iter_mut().find(|(cid, _)| *cid == id) {
+                let _ = writer.write_all(format!("{line}\n").as_bytes());
+            }
             let line = format!("STATE {}", st.mode.wire());
             self.broadcast(&mut st, &line);
         }
@@ -298,6 +361,9 @@ impl Hub {
                     Some(m) => self.set_mode(m),
                     None => eprintln!("✗ Modo desconocido desde el teléfono: {arg}"),
                 },
+                "TRANSPORT" => {
+                    if let Some(choice) = TransportChoice::parse(arg) { self.request_transport(id, choice); }
+                }
                 "PING" => {
                     if let Ok(token) = arg.parse::<u64>() {
                         let mut st = self.st.lock().unwrap();
@@ -319,36 +385,47 @@ impl Hub {
     }
 
     /// PC → Móvil: vacía el ring del sink hacia el teléfono y escucha su estado.
-    fn handle_player(self: &Arc<Self>, mut sock: TcpStream) {
+    pub fn handle_player(self: &Arc<Self>, mut sock: PlayerTransport) {
         let id = self.id();
         let shared = {
             let mut st = self.st.lock().unwrap();
-            let Some(shared) = st.sink.clone().filter(|_| !st.shutting_down && st.mode == Mode::PcToPhone) else { return };
+            let Some(shared) = st.sink.clone().filter(|_| !st.shutting_down && st.mode == Mode::PcToPhone && sock.is_current()) else { sock.close(); return };
+            let Ok(clone) = sock.try_clone() else { sock.close(); return };
             if let Some((_, old)) = st.player.take() {
-                let _ = old.shutdown(Shutdown::Both);
+                old.close();
             }
-            let Ok(clone) = sock.try_clone() else { return };
             st.player = Some((id, clone));
             shared
         };
         let _consumer = shared.consumer.lock().unwrap();
-        shared.ring.clear();
-        if sock.write_all(&SINK_FORMAT.encode()).is_err() {
+        if !self.player_is_current(id) || !sock.is_current() {
+            sock.close();
+            self.finish_player(id);
             return;
         }
-        println!("  Audio de la PC → teléfono: {} Hz, float 32 bits, estéreo", SINK_FORMAT.rate);
+        shared.ring.clear();
+        if sock.format(&SINK_FORMAT.encode()).is_err() {
+            sock.close();
+            self.finish_player(id);
+            return;
+        }
+        println!("  Audio de la PC → teléfono por {}: {} Hz, float 32 bits, estéreo", sock.label(), SINK_FORMAT.rate);
 
         let status = sock.try_clone().ok().map(|rs| {
             let hub = self.clone();
             let shared = shared.clone();
-            thread::spawn(move || hub.player_status_loop(rs, shared))
+            thread::spawn(move || hub.player_status_loop(id, rs, shared))
         });
 
-        let mut buf = vec![0u8; 32 * 1024];
+        let buffer_size = match &sock { PlayerTransport::Adb(_) => 32 * 1024, PlayerTransport::Aoa(_) => crate::aoa_frame::MAX_PCM };
+        let mut buf = vec![0u8; buffer_size];
         let mut last_send = engine::now_ns();
         'send: loop {
             shared.wake.wait(100);
             loop {
+                if !self.player_is_current(id) || !sock.is_current() {
+                    break 'send;
+                }
                 let n = shared.ring.pop(&mut buf);
                 if n == 0 {
                     break;
@@ -360,15 +437,22 @@ impl Hub {
                 self.max_send_us.fetch_max(((now - last_send) / 1000) as u32, Ordering::Relaxed);
                 last_send = now;
             }
-            let still_current = self.st.lock().unwrap().player.as_ref().is_some_and(|(pid, _)| *pid == id);
-            if !still_current {
+            if !self.player_is_current(id) {
                 break;
             }
         }
-        let _ = sock.shutdown(Shutdown::Both);
+        sock.close();
         if let Some(t) = status {
             let _ = t.join();
         }
+        self.finish_player(id);
+    }
+
+    fn player_is_current(&self, id: u64) -> bool {
+        self.st.lock().unwrap().player.as_ref().is_some_and(|(pid, _)| *pid == id)
+    }
+
+    fn finish_player(&self, id: u64) {
         let mut st = self.st.lock().unwrap();
         if st.player.as_ref().is_some_and(|(pid, _)| *pid == id) {
             st.player = None;
@@ -376,7 +460,7 @@ impl Hub {
     }
 
     /// El teléfono informa su cola cada ~10 ms; el lazo la lleva al objetivo ajustando nuestro reloj.
-    fn player_status_loop(&self, mut sock: TcpStream, shared: Arc<SinkShared>) {
+    fn player_status_loop(&self, id: u64, mut sock: PlayerTransport, shared: Arc<SinkShared>) {
         let mut control = RateLoop::new(engine::LOOP_BANDWIDTH_HZ, engine::LOOP_MAX_PPM, engine::LOOP_SMOOTHING_S);
         let rate = SINK_FORMAT.rate as f64;
         let frame = SINK_FORMAT.frame_bytes();
@@ -387,6 +471,11 @@ impl Hub {
                 Ok(()) => {}
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(_) => break,
+            }
+            // read_exact puede devolver un estado viejo después de que otra sesión tomó el sink.
+            let st = self.st.lock().unwrap();
+            if !st.player.as_ref().is_some_and(|(pid, _)| *pid == id) || !sock.is_current() {
+                break;
             }
             let s = PlayerStatus::decode(&b);
             let now = Instant::now();
@@ -401,7 +490,11 @@ impl Hub {
             self.phone.underruns.store(s.underruns, Ordering::Relaxed);
             self.phone.output_latency.store(s.output_latency, Ordering::Relaxed);
         }
-        shared.rate_dev.store(0.0);
+        sock.close();
+        let st = self.st.lock().unwrap();
+        if st.player.as_ref().is_some_and(|(pid, _)| *pid == id) {
+            shared.rate_dev.store(0.0);
+        }
     }
 
     /// Móvil → PC: lo que manda el capturador va al ring que lee PipeWire.

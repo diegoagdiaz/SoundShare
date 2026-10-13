@@ -37,6 +37,8 @@ class LinkService : Service() {
     private var controlThread: Thread? = null
     private val writer = Executors.newSingleThreadExecutor()
     private var player: Player? = null
+    private lateinit var accessory: AccessoryTransport
+    private var playerUsesAoa = false
     @Volatile private var quitting = false
     @Volatile private var offAck: CountDownLatch? = null
     @Volatile private var pendingPing = 0L
@@ -55,6 +57,39 @@ class LinkService : Service() {
         super.onCreate()
         instance = this
         createChannel()
+        transportPreference = TransportChoice.parse(getSharedPreferences("player", Context.MODE_PRIVATE)
+            .getString("transport", "aoa") ?: "aoa") ?: TransportChoice.AOA
+        playerCandidate = TransportCandidate(TransportChoice.ADB)
+        accessory = AccessoryTransport(this) {
+            main.post {
+                if (instance !== this || !running) return@post
+                accessoryState = accessory.state
+                if (accessoryState == AccessoryState.READY && shouldUseAoa() && running) restartPlayer()
+                notifyChanged()
+            }
+        }
+        accessoryState = accessory.state
+    }
+
+    private fun shouldUseAoa() = TransportSelection.useAoa(transportPreference, playerCandidate)
+
+    private fun refreshAccessory() {
+        main.post { if (running && transportPreference == TransportChoice.AOA) accessory.prepare() }
+    }
+
+    @Synchronized private fun restartPlayer() {
+        if (mode != Mode.PC_TO_PHONE || !running || quitting) return
+        stopPlayer()
+        applyMode(mode)
+        notifyChanged()
+    }
+
+    @Synchronized private fun selectTransport(choice: TransportChoice) {
+        transportPreference = choice
+        if (choice == TransportChoice.AOA) accessory.prepare(explicit = true)
+        send("TRANSPORT ${choice.wire}")
+        restartPlayer()
+        notifyChanged()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -79,6 +114,7 @@ class LinkService : Service() {
         controlOut = null
         runCatching { controlSocket?.close() }
         stopPlayer()
+        accessory.close()
         writer.shutdownNow()
         instance = null
         connected = false
@@ -122,6 +158,7 @@ class LinkService : Service() {
                         controlOut = out
                     }
                     send("HELLO ${Build.MANUFACTURER} ${Build.MODEL}|${Build.VERSION.SDK_INT}")
+                    send("TRANSPORT ${transportPreference.wire}")
                     if (quitting) send("MODE off")
                     // Con el túnel de adb armado, el connect siempre "funciona" aunque la PC no esté
                     // escuchando: recién estamos conectados cuando la PC contesta (manda STATE al toque).
@@ -143,6 +180,7 @@ class LinkService : Service() {
                 controlOut = null
                 controlSocket = null
                 connected = false
+                playerCandidate = TransportCandidate(TransportChoice.ADB, TransportReason.DISCONNECTED)
                 // Siempre: también si falló la sesión antes de actualizar connected o mode.
                 applyMode(Mode.OFF)
                 updateNotification()
@@ -161,6 +199,14 @@ class LinkService : Service() {
         val cmd = if (space < 0) line else line.substring(0, space)
         val arg = if (space < 0) "" else line.substring(space + 1)
         when (cmd) {
+            "PLAYER_TRANSPORT" -> TransportCandidate.parse(arg)?.let { candidate ->
+                synchronized(this) {
+                    playerCandidate = candidate
+                    val useAoa = shouldUseAoa()
+                    if (useAoa) main.post { if (running && shouldUseAoa()) accessory.prepare() }
+                    if (player != null && playerUsesAoa != useAoa) restartPlayer()
+                }
+            }
             "STATE" -> Mode.parse(arg)?.let {
                 applyMode(it)
                 if (it == Mode.OFF) offAck?.countDown()
@@ -195,7 +241,8 @@ class LinkService : Service() {
             playerStats = null
         }
         if (m == Mode.PC_TO_PHONE && player == null) {
-            player = Player(this) { stats ->
+            playerUsesAoa = shouldUseAoa()
+            player = Player(this, if (playerUsesAoa) accessory else null) { stats ->
                 playerStats = stats
                 notifyChanged()
             }.also { it.start() }
@@ -208,6 +255,7 @@ class LinkService : Service() {
     @Synchronized private fun stopPlayer() {
         player?.stop()
         player = null
+        playerStats = null
     }
 
     private fun send(line: String) {
@@ -308,6 +356,18 @@ class LinkService : Service() {
         private const val NOTIF_ID = 1
         const val ACTION_QUIT = "com.soundshare.QUIT"
 
+        @Volatile var transportPreference = TransportChoice.AOA
+            private set
+        @Volatile var playerCandidate = TransportCandidate(TransportChoice.ADB)
+            private set
+        @Volatile var accessoryState = AccessoryState.UNAVAILABLE
+            private set
+
+        fun requestTransport(context: Context, choice: TransportChoice) {
+            context.getSharedPreferences("player", Context.MODE_PRIVATE).edit().putString("transport", choice.wire).apply()
+            instance?.selectTransport(choice)
+        }
+
         @Volatile var connected = false
             private set
         @Volatile var mode = Mode.OFF
@@ -327,8 +387,11 @@ class LinkService : Service() {
         fun latencyEstimate(): LatencyEstimate.Value {
             val now = System.nanoTime()
             val pc = pcLatency?.takeIf { now - it.received < 3_000_000_000L }?.value
-            val rtt = transport?.takeIf { now - it.received < 3_000_000_000L }?.milliseconds
             val player = playerStats?.takeIf { now - it.measuredAtNs < 1_500_000_000L }
+            // El PING de CONTROL va por adb y no representa a AOA. Por AOA el bloque cruza el USB en
+            // menos de 1 ms y sus irregularidades ya están en la cola medida del teléfono.
+            val rtt = if (player?.transportName == "aoa") 0.0
+                else transport?.takeIf { now - it.received < 3_000_000_000L }?.milliseconds
             return LatencyEstimate.calculate(mode, pc, player?.queuedMs?.toDouble(),
                 player?.takeIf { it.outputLatencyFrames >= 0 }?.outputLatencyMs?.toDouble(),
                 player?.socketMs?.toDouble() ?: 0.0, rtt)
@@ -342,6 +405,9 @@ class LinkService : Service() {
             quitRequested = false
             context.startForegroundService(Intent(context, LinkService::class.java))
         }
+
+        /** El intent de accesorio puede conceder permiso con una actividad ya abierta. */
+        fun accessoryAttached() { instance?.refreshAccessory() }
 
         /** Pide un modo a la PC; el cambio real llega como STATE. */
         fun requestMode(m: Mode) {

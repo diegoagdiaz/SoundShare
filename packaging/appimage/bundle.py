@@ -77,6 +77,11 @@ def bundle(app_dir, binary):
             crate_dir = licenses / "rust-crates" / license_file.parent.name
             crate_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(license_file, crate_dir / license_file.name)
+    # libusb va estática por la feature vendored; su COPYING está dentro de las fuentes.
+    for libusb_copying in Path("/build/cargo/registry/src").glob("*/libusb1-sys-*/libusb/COPYING"):
+        crate_dir = licenses / "rust-crates" / libusb_copying.parent.parent.name / "libusb"
+        crate_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(libusb_copying, crate_dir / "COPYING")
     runtime_license = Path("/opt/appimage-runtime.LICENSE")
     if runtime_license.is_file():
         shutil.copy2(runtime_license, licenses / "appimage-runtime.txt")

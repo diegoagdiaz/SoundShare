@@ -6,6 +6,9 @@
 //!   soundshare install [apk]   instala la app en el teléfono
 
 mod adb;
+mod aoa;
+mod aoa_frame;
+mod player_transport;
 mod control;
 mod engine;
 mod hub;
@@ -151,6 +154,8 @@ fn watch_devices(hub: Arc<Hub>, adb: Adb, serial: Option<String>, port: u16, sta
     let mut current: Option<adb::Device> = None;
     let mut warned = String::new();
     let mut start_mode = start_mode;
+    let mut attempted: Option<String> = None;
+    let mut refresh_reverse = false;
     loop {
         let found = match pick_device(&adb, serial.as_deref()) {
             Ok(d) => d,
@@ -174,33 +179,65 @@ fn watch_devices(hub: Arc<Hub>, adb: Adb, serial: Option<String>, port: u16, sta
             warned = d.state.clone();
         }
 
-        if ready.as_ref().map(|d| &d.serial) != current.as_ref().map(|d| &d.serial) {
+        if ready.is_none() && attempted.as_ref().is_some_and(|s| aoa::present(s)) {
+            // Un reinicio de adb no es una desconexión de cable. Rehacer reverse al volver.
+            refresh_reverse = true;
+            thread::sleep(Duration::from_secs(1));
+            continue;
+        }
+        if ready.is_none() && current.is_none() && attempted.is_some() {
+            attempted = None;
+            hub.set_aoa(None);
+        }
+
+        if ready.as_ref().map(|d| &d.serial) != current.as_ref().map(|d| &d.serial) || refresh_reverse {
             match &ready {
-                Some(d) => match adb.reverse(&d.serial, port) {
-                    Ok(()) => {
-                        println!("● Teléfono conectado: {} ({})", d.model, d.serial);
-                        current = ready.clone();
-                        warned.clear();
-                        hub.device_changed(ready.clone());
-                        match adb.package_path(&d.serial) {
-                            Ok(Some(_)) => {
-                                println!("  Abriendo SoundShare: elegí el sentido del audio en el teléfono (o acá: 1 / 2).");
-                                if let Err(e) = adb.start_app(&d.serial) {
-                                    eprintln!("⚠ No pude abrir la app: {e}. Abrí SoundShare en el teléfono.");
-                                }
-                                if let Some(m) = start_mode.take() {
-                                    hub.set_mode(m);
-                                }
+                Some(d) => {
+                    // Una sola conmutación por conexión de cable, antes de reverse/CONTROL/CAPTURE.
+                    if attempted.as_deref() != Some(&d.serial) {
+                        attempted = Some(d.serial.clone());
+                        if std::env::var("SOUNDSHARE_PLAYER_TRANSPORT").as_deref() != Ok("adb") {
+                            match aoa::prepare(&d.serial) {
+                                Ok(link) => { hub.set_aoa(Some(link.clone())); link.run(Arc::downgrade(&hub)); }
+                                Err(e) => eprintln!("⚠ AOA no disponible: {e}. PLAYER por adb."),
                             }
-                            Ok(None) => println!("⚠ Instalá SoundShare.apk en el teléfono y reconectá el cable (también podés usar «soundshare install»)."),
-                            Err(e) => eprintln!("⚠ No pude comprobar la app: {e}. Revisá el teléfono y reconectá el cable."),
+                            // START reinicia adb. Esperar aquí evita confundirlo con cable desconectado.
+                            let until = std::time::Instant::now() + Duration::from_secs(15);
+                            while !pick_device(&adb, Some(&d.serial)).ok().flatten().is_some_and(|v| v.state == "device") {
+                                if std::time::Instant::now() >= until { break; }
+                                thread::sleep(Duration::from_millis(200));
+                            }
                         }
                     }
-                    Err(e) => eprintln!("✗ No pude abrir el túnel USB: {e}"),
+                    match adb.reverse(&d.serial, port) {
+                        Ok(()) => {
+                            println!("● Teléfono conectado: {} ({})", d.model, d.serial);
+                            current = ready.clone();
+                            refresh_reverse = false;
+                            warned.clear();
+                            hub.device_changed(ready.clone());
+                            match adb.package_path(&d.serial) {
+                                Ok(Some(_)) => {
+                                    println!("  Abriendo SoundShare: elegí el sentido del audio en el teléfono (o acá: 1 / 2).");
+                                    if let Err(e) = adb.start_app(&d.serial) {
+                                        eprintln!("⚠ No pude abrir la app: {e}. Abrí SoundShare en el teléfono.");
+                                    }
+                                    if let Some(m) = start_mode.take() {
+                                        hub.set_mode(m);
+                                    }
+                                }
+                                Ok(None) => println!("⚠ Instalá SoundShare.apk en el teléfono y reconectá el cable (también podés usar «soundshare install»)."),
+                                Err(e) => eprintln!("⚠ No pude comprobar la app: {e}. Revisá el teléfono y reconectá el cable."),
+                            }
+                        }
+                        Err(e) => eprintln!("✗ No pude abrir el túnel USB: {e}"),
+                    }
                 },
                 None => {
                     println!("○ Teléfono desconectado");
                     current = None;
+                    attempted = None;
+                    hub.set_aoa(None);
                     hub.device_changed(None);
                 }
             }

@@ -18,13 +18,13 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * PC → Móvil: recibe PCM por el túnel de adb y lo reproduce con la menor latencia que da el teléfono.
+ * PC → Móvil: recibe PCM por AOA o el túnel de adb y lo reproduce con la menor latencia que da el teléfono.
  *
  * El teléfono no remuestrea nada. Cada 10 ms le informa a la PC cuántos frames tiene encolados
  * y la PC ajusta finamente su propio ritmo (resampler adaptativo de PipeWire) para que la cola
  * se quede en [target]. Así los dos relojes quedan enganchados sin cortes ni deriva.
  */
-class Player(private val context: Context, private val onStats: (Stats) -> Unit) {
+class Player(private val context: Context, private val accessory: AccessoryTransport?, private val onStats: (Stats?) -> Unit) {
 
     data class Stats(
         val sampleRate: Int,
@@ -35,6 +35,7 @@ class Player(private val context: Context, private val onStats: (Stats) -> Unit)
         val fastTrack: Boolean,
         val socketFrames: Int = 0,
         val measuredAtNs: Long = System.nanoTime(),
+        val transportName: String = "adb",
     ) {
         private fun ms(frames: Int) = frames * 1000f / sampleRate
         val targetMs get() = ms(targetFrames)
@@ -43,52 +44,78 @@ class Player(private val context: Context, private val onStats: (Stats) -> Unit)
         val socketMs get() = ms(socketFrames)
     }
 
-    @Volatile private var running = false
-    @Volatile private var socket: Socket? = null
+    private var generation: PlayerGeneration? = null
     private var thread: Thread? = null
 
-    fun start() {
-        if (running) return
-        running = true
-        thread = Thread(::loop, "ss-player").also { it.start() }
+    @Synchronized fun start() {
+        if (generation != null) return
+        val run = PlayerGeneration()
+        generation = run
+        thread = Thread({ loop(run) }, "ss-player").also { it.isDaemon = true; it.start() }
     }
 
-    fun stop() {
-        running = false
-        runCatching { socket?.close() }
-        thread?.join(1500)
+    @Synchronized fun stop() {
+        generation?.cancel()
+        generation = null
+        thread?.join(150)
         thread = null
     }
 
-    private fun loop() {
+    private fun loop(run: PlayerGeneration) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-        while (running) {
+        while (run.active) {
             try {
-                session()
+                session(run)
             } catch (e: IOException) {
-                if (running) Log.w(TAG, "conexión de audio cortada: ${e.message}")
+                if (run.active) Log.w(TAG, "conexión de audio cortada: ${e.message}")
             } catch (e: Exception) {
-                Log.e(TAG, "error en el reproductor", e)
+                if (run.active) Log.e(TAG, "error en el reproductor", e)
             }
-            if (running) SystemClock.sleep(300)
+            run.ifActive { onStats(null) }
+            if (run.active) SystemClock.sleep(300)
         }
     }
 
-    private fun session() {
+    private fun session(run: PlayerGeneration) {
+        val usb = run.ifActive { accessory?.connect() }
+        if (usb != null) {
+            if (!run.attach(usb)) return
+            try {
+                usb.use {
+                    if (!run.active) return
+                    Protocol.writeHello(usb.output, Protocol.ROLE_PLAYER)
+                    val fmt = Protocol.readFormat(usb.input)
+                    if (run.active) play(run, fmt, usb.input, usb.output, "aoa")
+                }
+            } catch (e: Exception) {
+                run.ifActive { if (!usb.peerEnded) accessory?.disable(usb) }
+                throw e
+            } finally {
+                run.detach(usb)
+            }
+            return
+        }
+        if (!run.active) return
         val s = Socket()
-        socket = s
-        s.use {
-            s.tcpNoDelay = true
-            s.connect(InetSocketAddress("127.0.0.1", Protocol.PORT), 2000)
-            val input = s.getInputStream()
-            val out = s.getOutputStream()
-            Protocol.writeHello(out, Protocol.ROLE_PLAYER)
-            val fmt = Protocol.readFormat(input)
-            play(fmt, s, input, out)
+        if (!run.attach(s)) return
+        try {
+            s.use {
+                if (!run.active) return
+                s.tcpNoDelay = true
+                s.connect(InetSocketAddress("127.0.0.1", Protocol.PORT), 2000)
+                if (!run.active) return
+                val input = s.getInputStream()
+                val out = s.getOutputStream()
+                Protocol.writeHello(out, Protocol.ROLE_PLAYER)
+                val fmt = Protocol.readFormat(input)
+                if (run.active) play(run, fmt, input, out, "adb")
+            }
+        } finally {
+            run.detach(s)
         }
     }
 
-    private fun play(fmt: Protocol.Format, s: Socket, input: java.io.InputStream, out: java.io.OutputStream) {
+    private fun play(run: PlayerGeneration, fmt: Protocol.Format, input: java.io.InputStream, out: java.io.OutputStream, transport: String) {
         val am = context.getSystemService(AudioManager::class.java)
         val burst = am.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)?.toIntOrNull() ?: 256
         val frameBytes = fmt.frameBytes
@@ -116,49 +143,56 @@ class Player(private val context: Context, private val onStats: (Stats) -> Unit)
             .setBufferSizeInBytes(fmt.sampleRate / 5 * frameBytes)
             .build()
 
-        val capacity = track.bufferCapacityInFrames
-        val fast = track.performanceMode == AudioTrack.PERFORMANCE_MODE_LOW_LATENCY
-        // Arrancamos donde terminó la última sesión: el jitter del USB depende del teléfono y la PC.
-        val prefs = context.getSharedPreferences("player", Context.MODE_PRIVATE)
-        val learnedKey = "target_ms_${fmt.sampleRate}"
-        val initialMs = prefs.getFloat(learnedKey, INITIAL_TARGET_MS)
-        val target = QueueTarget(burst, fmt.sampleRate, capacity / 2, (initialMs * fmt.sampleRate / 1000).toInt())
-        fun applyTarget() {
-            // El umbral de escritura queda por encima del objetivo: write() casi nunca bloquea.
-            val bufferFrames = track.setBufferSizeInFrames((target.frames + 2 * burst).coerceAtMost(capacity))
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                // Arrancar al reunir el objetivo, sin esperar también el margen de escritura.
-                val actualBufferFrames = if (bufferFrames > 0) bufferFrames else track.bufferSizeInFrames
-                track.setStartThresholdInFrames(minOf(target.frames, actualBufferFrames).coerceAtLeast(1))
-            }
-        }
-        applyTarget()
-        Log.i(TAG, "pista: ${fmt.sampleRate} Hz, burst $burst, capacidad $capacity, rápida=$fast, objetivo ${target.frames}")
-
-        val buf = ByteArray(frameBytes * 1024)
-        val direct = ByteBuffer.allocateDirect(buf.size).order(ByteOrder.nativeOrder())
-        val status = ByteBuffer.allocate(Protocol.STATUS_BYTES)
-        val ts = AudioTimestamp()
-        var fill = 0
-        var framesWritten = 0L
-        var headTotal = 0L
-        var lastHead = 0L
-        var dropFrames = 0L
-        var started = false
-        var lastUnderruns = 0
-        var playStart = 0L
-        var lastStatus = 0L
-        var lastUi = 0L
-        var lastRead = SystemClock.elapsedRealtimeNanos()
-        var writeNs = 0L
-        // Diagnóstico (logcat): huecos entre lecturas del socket y cola mínima por segundo.
-        var maxGap = 0L
-        var minQueued = Int.MAX_VALUE
-        var lastDiag = lastRead
-
+        val playback = java.io.Closeable { track.pause(); track.flush() }
+        if (!run.attachPlayback(playback)) { track.release(); return }
         try {
-            while (running) {
+            val capacity = track.bufferCapacityInFrames
+            val fast = track.performanceMode == AudioTrack.PERFORMANCE_MODE_LOW_LATENCY
+            // Arrancamos donde terminó la última sesión: el jitter del USB depende del teléfono y la PC.
+            val prefs = context.getSharedPreferences("player", Context.MODE_PRIVATE)
+            val learnedKey = if (transport == "adb") "target_ms_${fmt.sampleRate}" else "target_ms_aoa_${fmt.sampleRate}"
+            val initialMs = prefs.getFloat(learnedKey, INITIAL_TARGET_MS)
+            val target = QueueTarget(burst, fmt.sampleRate, capacity / 2, (initialMs * fmt.sampleRate / 1000).toInt())
+            fun applyTarget() {
+                if (!run.active) return
+                // El umbral de escritura queda por encima del objetivo: write() casi nunca bloquea.
+                val bufferFrames = track.setBufferSizeInFrames((target.frames + 2 * burst).coerceAtMost(capacity))
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    // Arrancar al reunir el objetivo, sin esperar también el margen de escritura.
+                    val actualBufferFrames = if (bufferFrames > 0) bufferFrames else track.bufferSizeInFrames
+                    track.setStartThresholdInFrames(minOf(target.frames, actualBufferFrames).coerceAtLeast(1))
+                }
+                // Guardar al ajustar: un hilo cancelado no puede persistir por encima del nuevo.
+                run.ifActive { prefs.edit().putFloat(learnedKey, target.frames * 1000f / fmt.sampleRate).apply() }
+            }
+            applyTarget()
+            run.ifActive { onStats(Stats(fmt.sampleRate, target.frames, 0, -1, 0, fast, transportName = transport)) }
+            Log.i(TAG, "transporte=$transport, pista: ${fmt.sampleRate} Hz, burst $burst, capacidad $capacity, rápida=$fast, objetivo ${target.frames}")
+
+            val buf = ByteArray(frameBytes * 1024)
+            val direct = ByteBuffer.allocateDirect(buf.size).order(ByteOrder.nativeOrder())
+            val status = ByteBuffer.allocate(Protocol.STATUS_BYTES)
+            val ts = AudioTimestamp()
+            var fill = 0
+            var framesWritten = 0L
+            var headTotal = 0L
+            var lastHead = 0L
+            var dropFrames = 0L
+            var started = false
+            var lastUnderruns = 0
+            var playStart = 0L
+            var lastStatus = 0L
+            var lastUi = 0L
+            var lastRead = SystemClock.elapsedRealtimeNanos()
+            var writeNs = 0L
+            // Diagnóstico (logcat): huecos entre lecturas del socket y cola mínima por segundo.
+            var maxGap = 0L
+            var minQueued = Int.MAX_VALUE
+            var lastDiag = lastRead
+
+            while (run.active) {
                 val n = input.read(buf, fill, buf.size - fill)
+                if (!run.active) break
                 if (n < 0) throw EOFException("la PC cerró el audio")
                 val arrived = SystemClock.elapsedRealtimeNanos()
                 // Tiempo sin datos, sin contar lo que tardamos nosotros en escribir.
@@ -181,13 +215,15 @@ class Player(private val context: Context, private val onStats: (Stats) -> Unit)
                     direct.put(buf, off, whole - off)
                     direct.flip()
                     // AudioTrack puede aceptar solo parte del bloque; su posición conserva el sufijo.
-                    while (running && direct.hasRemaining()) {
-                        val w = track.write(direct, direct.remaining(),
-                            if (started) AudioTrack.WRITE_BLOCKING else AudioTrack.WRITE_NON_BLOCKING)
+                    while (run.active && direct.hasRemaining()) {
+                        val w = run.ifActive {
+                            track.write(direct, direct.remaining(), AudioTrack.WRITE_NON_BLOCKING)
+                        } ?: break
                         if (w < 0) throw IOException("AudioTrack.write = $w")
                         framesWritten += w / frameBytes
+                        if (!run.active) break
                         if (!started && (framesWritten >= target.frames || w == 0)) {
-                            track.play()
+                            run.ifActive { track.play() } ?: break
                             started = true
                             playStart = SystemClock.elapsedRealtimeNanos()
                         }
@@ -195,12 +231,13 @@ class Player(private val context: Context, private val onStats: (Stats) -> Unit)
                     }
                     writeNs = SystemClock.elapsedRealtimeNanos() - arrived
                 }
+                if (!run.active) break
                 // Lo que sobra (un frame partido) queda al principio para la próxima lectura.
                 System.arraycopy(buf, whole, buf, 0, fill - whole)
                 fill -= whole
 
                 if (!started && framesWritten >= target.frames) {
-                    track.play()
+                    run.ifActive { track.play() } ?: break
                     started = true
                     playStart = SystemClock.elapsedRealtimeNanos()
                 }
@@ -246,25 +283,25 @@ class Player(private val context: Context, private val onStats: (Stats) -> Unit)
                 if (DIAG) {
                     minQueued = minOf(minQueued, queued)
                     if (now - lastDiag >= 1_000_000_000L) {
-                        Log.d(TAG, "diag: hueco máx ${maxGap / 1000} µs, cola mín $minQueued, objetivo ${target.frames}, cortes $underruns")
+                        Log.d(TAG, "diag: transporte=$transport, hueco máx ${maxGap / 1000} µs, cola mín $minQueued, objetivo ${target.frames}, cortes $underruns")
                         maxGap = 0
                         minQueued = Int.MAX_VALUE
                         lastDiag = now
                     }
                 }
                 Protocol.encodeStatus(status, queued, target.frames, underruns, outputLatency)
+                if (!run.active) break
                 out.write(status.array(), 0, Protocol.STATUS_BYTES)
 
                 if (now - lastUi > UI_PERIOD_NS) {
                     lastUi = now
-                    onStats(Stats(fmt.sampleRate, target.frames, queued, outputLatency, underruns, fast, inSocket))
+                    run.ifActive { onStats(Stats(fmt.sampleRate, target.frames, queued, outputLatency, underruns, fast, inSocket, transportName = transport)) }
                 }
             }
         } finally {
-            if (started) prefs.edit().putFloat(learnedKey, target.frames * 1000f / fmt.sampleRate).apply()
-            runCatching { track.pause(); track.flush() }
+            run.ifActive { runCatching { playback.close() } }
+            run.detachPlayback(playback)
             track.release()
-            if (!s.isClosed) runCatching { s.close() }
         }
     }
 

@@ -6,6 +6,7 @@ rust-version = "1.88"
 description = "Comparte audio entre la PC (Linux/PipeWire) y un teléfono Android por cable USB"
 
 [dependencies]
+rusb = { version = "0.9.4", features = ["vendored"] }
 libc = "0.2.190"
 pipewire = { version = "0.10.1", features = ["v1_2_0"] }
 
