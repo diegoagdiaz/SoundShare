@@ -60,6 +60,9 @@ object CaptureMain {
     @SuppressLint("MissingPermission")
     private fun run(port: Int, keepVolume: Boolean, debug: Boolean) {
         if (Looper.getMainLooper() == null) Looper.prepareMainLooper()
+        // En Android 11 su inicialización consulta recursos del contexto real del sistema.
+        // Cargarlo antes de instalar el contexto mínimo del capturador evita esa consulta tardía.
+        if (Build.VERSION.SDK_INT == Build.VERSION_CODES.R) Class.forName("android.app.AppOpsManager")
         ShellIdentity.install()
 
         // Primero la PC: si no está escuchando no tiene sentido desviar el audio del teléfono.
@@ -136,29 +139,21 @@ object CaptureMain {
     }
 
     /**
-     * Android 11 solo deja grabar al uid del shell mientras tiene una actividad visible (según el momento,
-     * rechaza al crear el grabador o al arrancarlo). Si pasa, abrimos un instante una actividad propia del
-     * shell, arrancamos la captura y la cerramos: una vez en marcha, la captura sigue sin ella.
+     * Android 11 necesita una actividad del shell para habilitar la captura. Si el primer intento falla,
+     * la iniciamos en un display privado fuera de pantalla y lo liberamos al arrancar el grabador.
      */
     @SuppressLint("MissingPermission")
     private fun openRecorder(): AudioRecord {
         try {
             return createAndStartRecorder()
         } catch (e: Exception) {
-            // El recurso de la actividad visible solo corresponde a Android 11.
-            // Un fallo de inicialización en otra versión no se arregla mostrando HeapDumpActivity.
+            // El arranque auxiliar solo corresponde a Android 11.
             if (Build.VERSION.SDK_INT != Build.VERSION_CODES.R) throw e
             log("no se pudo iniciar el grabador: $e")
         }
 
-        log("Android pide una actividad visible para grabar; abriendo una un instante")
-        try {
-            exec("am", "start", "-W", "-n", "${ShellIdentity.PACKAGE}/.HeapDumpActivity")
-            return createAndStartRecorder()
-        } finally {
-            // Terminamos la limpieza antes de que main pueda llamar exitProcess tras un error.
-            closeShellTasks()
-        }
+        log("preparando la captura de Android 11 fuera de pantalla")
+        return Android11CaptureBootstrap.open(::createAndStartRecorder) { command -> exec(*command) }
     }
 
     @SuppressLint("MissingPermission")
@@ -185,26 +180,6 @@ object CaptureMain {
             rec.release()
             throw e
         }
-    }
-
-    private fun closeShellTasks() {
-        val removed = runCatching {
-            val list = exec("am", "stack", "list")
-            val re = Regex("""taskId=(\d+): ${Regex.escape(ShellIdentity.PACKAGE)}/""")
-            val tasks = re.findAll(list).toList()
-            for (m in tasks) {
-                val result = exec("am", "stack", "remove", m.groupValues[1])
-                check(!result.contains("Error", ignoreCase = true))
-            }
-            tasks.isNotEmpty()
-        }.getOrDefault(false)
-        if (removed) return
-        // Si el sistema no permite quitar la tarea, volvemos a nuestra app.
-        val covered = runCatching {
-            val result = exec("am", "start", "-n", "com.soundshare/.MainActivity")
-            check(!result.contains("Error", ignoreCase = true))
-        }.isSuccess
-        if (!covered) runCatching { exec("input", "keyevent", "KEYCODE_HOME") }
     }
 
     /**
