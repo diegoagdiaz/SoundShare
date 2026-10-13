@@ -92,6 +92,29 @@ Verificación de esta revisión: **27 tests Rust y 40 tests Android, todos exito
 
 No se usó el teléfono, no se ejecutó el Hub ni se reprodujo audio en esta revisión. Tampoco se reconstruyó `pc/target/release/soundshare`: el nuevo ejecutable está en `pc/target/debug/soundshare` y el APK en `android/app/build/outputs/apk/debug/app-debug.apk`. Los resultados acústicos/USB de la tabla pertenecen a las corridas anteriores, no al selector ni a las generaciones nuevas.
 
+## Latencia: perfiles, arranque y cuántum (v0.3.2)
+
+Mediciones del 13 de octubre de 2026 en el moto g play (2021), Android 11, con `scripts/measure_player.py` por AOA. El objetivo aprendido se fijó en 20 ms antes de cada corrida. El teléfono tiene burst de 240 frames y su mezclador rápido informa 23 ms de latencia propia. La latencia es la aproximación del hub, no una medición acústica.
+
+| Variante | Duración | Latencia del hub, mediana / final | Objetivo | Cortes |
+| --- | ---: | ---: | ---: | ---: |
+| v0.3.1, cuántum 256 | 120 s | 63 / 54 ms | 20–40 ms | 2 |
+| v0.3.1 con cuántum 128 | 120 s | 56 / 45 ms | 20–35 ms | 2 |
+| v0.3.2, estable | 120 s | 46 / 41 ms | 15–25 ms | 2 (uno con la pista llena: de la salida) |
+| v0.3.2, estable | 300 s | 47 / 46 ms | 15–30 ms | 2 (un hueco de 13,7 ms con el objetivo en 15 ms) |
+| v0.3.2, mínima con cola fija de 7,7 ms (descartada) | 120 s | 35 / 34 ms | 7,7 ms | 180 |
+| v0.3.2, mínima | 120 s | 38 / 40 ms | 9–13 ms | 23 |
+| v0.3.2, mínima | 300 s | 39 / 42 ms | 11–17 ms | 47 |
+
+Hallazgos:
+
+- **Bache de 50 ms al arrancar.** Las siete corridas previas a la corrección tuvieron un hueco de 51–55 ms en el primer segundo; las cinco posteriores, de 4–7 ms. No venía del USB: la PC siguió enviando cada ≤13 ms. Cronometrando el bucle del reproductor, el bache estaba en la primera llamada a `QueueTarget.tick()`: `IntArray.max()` carga `ArraysKt` de kotlin-stdlib, una clase con miles de métodos. Producía cortes al arrancar y dejaba 30–50 ms de cola de más durante un minuto. Se reemplazó por un bucle.
+- **Acumulación al arrancar.** Mientras se creaba la pista y despertaba la salida se juntaban hasta 6336 frames (132 ms), descartados con un salto ya sonando. Ahora la pista arranca con silencio y el audio real entra recién con la salida en marcha.
+- **Cortes de la salida.** A los 6–9 s de arrancar aparecían dos cortes con 20–27 ms en la pista y huecos de datos de menos de 10 ms, que subían el objetivo a 35–40 ms durante minutos. Un corte con al menos un burst en la pista ya no agranda la cola.
+- **De dónde sale el jitter.** Con cuántum 128, la PC procesa cada 3,0 ms como máximo, pero el máximo por segundo entre envíos USB fue de 4,7–4,9 ms en la mediana. La escritura USB sincrónica llegó a tardar 2–9 ms, porque espera que el teléfono vuelva a pedir datos al driver del accesorio. El lector USB del teléfono vio casi los mismos huecos que el reproductor (mediana 5,6 ms, p95 7,3 ms). Pasar el hilo de envío de la PC a `SCHED_RR` con rtkit no los redujo (mediana 4,2 ms, p95 8,2 ms), así que no se incorporó.
+- **Perfil mínimo.** Una cola fija de medio burst más un bloque de la PC (más medio burst) cortaba 1,5 veces por segundo en este teléfono. La versión adaptativa de 10 s queda en 9–17 ms y unos 9 cortes por minuto: gana ~8 ms frente al estable en el moto. En teléfonos con menos jitter USB la diferencia debería ser mayor; falta medirlo en el A21s.
+- **Costo del cuántum 128.** En la PC, el hub pasó de 7,5 % a 11 % de un núcleo y PipeWire de 1,2 % a 1,9 %.
+
 ## Límites y verificación humana
 
 No se mide latencia acústica, propagación USB AOA ni se modifica la latencia del HAL/FastMixer. El feedback de estado conserva la política existente: ~10 ms cuando avanza el receptor, sin heartbeat separado. El objetivo no es fijo: sube ante huecos/cortes y baja lentamente; no se promete 10–15 ms en todos los teléfonos.

@@ -77,6 +77,13 @@ En Android, aceptá el diálogo **Abrir SoundShare cuando se conecte este acceso
 
 La tarjeta **Transporte PC → Móvil** muestra el transporte real (**AOA** o **adb**) y una línea con el motivo si AOA cae a adb (permiso pendiente/rechazado, enlace fallido, accesorio no disponible o desconectado). Elegí **AOA (menor latencia)** o **adb**; la preferencia queda guardada. Si está sonando, cambia reiniciando sólo PLAYER, sin cambiar el modo ni CAPTURE. Elegir adb conserva el USB en modo accesorio. Tocar AOA puede volver a pedir un permiso rechazado y manda `TRANSPORT aoa` por CONTROL para reabrir un Link muerto en la PC sin conmutar el cable.
 
+La tarjeta **Latencia PC → Móvil** elige cuánto colchón tiene el teléfono:
+
+- **Estable** (predeterminado): la cola cubre el peor hueco del USB de los últimos 30 s más un burst del mezclador. Busca no cortar nunca.
+- **Mínima**: la cola justa para el peor hueco de los últimos 10 s, más medio burst. Lo que se atrasa tras un hueco se descarta enseguida, así siempre suena lo último que llegó. A cambio, los huecos más raros del USB producen cortes.
+
+Cada perfil aprende su propio objetivo y lo guarda. Cambiarlo reinicia sólo PLAYER; la PC no interviene.
+
 Si el cable no está en modo accesorio, la app pide **reconectar el cable y arrancar la PC con AOA habilitado**: reiniciá el Hub sin `SOUNDSHARE_PLAYER_TRANSPORT=adb` (o con `aoa`) y reconectá. El selector no reenumera USB durante un modo activo, porque eso cortaría adb/CONTROL y podría interrumpir CAPTURE. Ver las variantes CONTROL y compatibilidad en [el protocolo](docs/PROTOCOLO.md).
 
 CONTROL y CAPTURE siguen en `127.0.0.1:47100` por `adb reverse tcp:47100 tcp:47100`. CAPTURE se lanza con `adb shell` y conserva la identidad shell necesaria en Android 11. Para comparar o forzar el transporte anterior: `SOUNDSHARE_PLAYER_TRANSPORT=adb ./soundshare pc2phone`. Sin esa variable se intenta AOA; `aoa` también intenta AOA con fallback.
@@ -202,13 +209,15 @@ La PC acepta `-p PUERTO`, pero la app usa el puerto fijo 47100: dejá el predete
 
 PC → Móvil transporta float de 32 bits a 48 kHz estéreo. Móvil → PC transporta PCM de 16 bits a 48 kHz estéreo, el formato de la mezcla capturada. No hay codec con pérdidas. La corrección de reloj usa el resampler adaptativo de PipeWire con `resample.quality=10`; por eso la salida completa no se promete idéntica bit a bit tras el ajuste de reloj.
 
-El sink pide un cuántum de 256 frames (5,3 ms) y sigue procesando aunque no haya audio. Android solicita AudioTrack de baja latencia; obtener una pista rápida depende del teléfono. En Android 12+, fija el [umbral de inicio de AudioTrack](https://developer.android.com/reference/android/media/AudioTrack#setStartThresholdInFrames(int)) en el objetivo de cola, separado de los dos bursts de margen para escribir. La cola recuerda el peor hueco del túnel USB en una ventana de 30 s: sube enseguida ante un hueco mayor y baja hasta un burst cada 20 s, sin pasar por debajo del nivel seguro. Los cortes elevan un piso que decae cada 30 s. El objetivo aprendido se guarda en SharedPreferences para la próxima sesión, separado para adb y AOA. Se conserva el mínimo de dos bursts; AOA se adapta con la misma política de huecos y cortes. Ante una acumulación grande se descarta el exceso para recuperar latencia.
+El sink de PC → Móvil pide un cuántum de 128 frames (2,7 ms) y sigue procesando aunque no haya audio. No comparte grafo con la placa de la laptop: el bloque más chico baja la latencia de la PC y el «serrucho» de la cola del teléfono, a cambio de unos 4 puntos más de CPU de un núcleo (medido: 7,5 % → 11 % el hub y 1,2 % → 1,9 % PipeWire). Móvil → PC conserva 256 frames. Android solicita AudioTrack de baja latencia; obtener una pista rápida depende del teléfono. En Android 12+, fija el [umbral de inicio de AudioTrack](https://developer.android.com/reference/android/media/AudioTrack#setStartThresholdInFrames(int)) en el objetivo de cola, separado de los dos bursts de margen para escribir. La cola recuerda el peor hueco del túnel USB en una ventana de 30 s: sube enseguida ante un hueco mayor y baja hasta un burst cada 20 s, sin pasar por debajo del nivel seguro. Los cortes elevan un piso que decae cada 30 s. El objetivo aprendido se guarda en SharedPreferences para la próxima sesión, separado para adb y AOA. Se conserva el mínimo de dos bursts; AOA se adapta con la misma política de huecos y cortes. Un corte con al menos un burst en la pista no agranda la cola: no lo causó la entrega, sino la salida de Android. Ante una acumulación grande se descarta el exceso para recuperar latencia.
+
+La pista arranca con silencio. El audio real entra recién cuando la salida ya está presentando muestras (y pasaron 100 ms de su arranque); lo que llega mientras Android despierta el parlante se descarta sin oírse. Antes se juntaban 20–130 ms al arrancar que había que descartar con un salto en pleno audio o drenar durante un minuto.
 
 Móvil → PC espera un solo frame de AudioRecord y luego drena hasta 1024 frames disponibles sin bloquear. Así un resto parcial del bloque de REMOTE_SUBMIX se envía enseguida, sin esperar a completar un pedido fijo de 240 frames. Esto no elimina el período de entrega del submix ni el jitter de adb.
 
 Verificación de ese cambio en el moto g play (2021), Android 11: en pruebas de captura de 12 s por variante, las iteraciones de lectura/envío estables bajaron de 200–201/s a 47/s al enviar cada bloque disponible completo. Ambas variantes entregaron PCM a 48 kHz estéreo y cerraron correctamente. Es una comprobación de la entrega de captura; no mide la latencia total de extremo a extremo ni la fidelidad con un tono.
 
-Mediciones aportadas por el autor en un **moto g play (2021), Android 11**; no son garantías para otros equipos ni pruebas ejecutadas por este script:
+Mediciones aportadas por el autor en un **moto g play (2021), Android 11**, con el cuántum anterior de 256 frames y PLAYER por adb; no son garantías para otros equipos ni pruebas ejecutadas por este script. Las mediciones por AOA, con los perfiles y el cuántum actual, están en [el informe AOA](docs/MEDICION_AOA.md):
 
 | Medición | Resultado observado |
 | --- | --- |
@@ -219,7 +228,7 @@ Mediciones aportadas por el autor en un **moto g play (2021), Android 11**; no s
 | Cortes PC → Móvil | 0 en 90 s |
 | Buffer PC en Móvil → PC | ~26–30 ms; 0–1 cortes por minuto |
 | Entrega de REMOTE_SUBMIX | Bloques de ~21 ms: piso de Móvil → PC, no latencia total |
-| Arranque del parlante del teléfono | ~100–150 ms; se descarta la acumulación excesiva |
+| Arranque del parlante del teléfono | ~100–150 ms; hoy pasa en silencio, sin acumular audio |
 | Fidelidad de la captura de submix con volumen máximo | Tono de amplitud 8000 → pico 8000, RMS 5656,4 |
 | Móvil → PC, tono de 440 Hz a −12 dBFS recibido del teléfono | Bit a bit; THD+N −84,5 dB (piso teórico de 16 bits: −85,8 dB) |
 | Móvil → PC tras el resampler adaptativo | THD+N −82,4 dB, nivel exacto, L=R |
@@ -252,7 +261,7 @@ La prueba fija el volumen de medios del teléfono en 1, activa `diag:`, usa ruid
 
 ## Limitaciones y próximas ideas
 
-Actualmente necesita Linux/PipeWire, cable USB y depuración USB. No ofrece audio simultáneo en ambos sentidos, interfaz gráfica para la PC ni transporte Wi-Fi. Los formatos emitidos son fijos a 48 kHz estéreo. La latencia tiene el piso del hardware y el jitter del transporte elegido; el buffer puede crecer con los cortes y los descartes pueden producir un salto audible. La captura usa APIs internas; se verificó en Android 11 y Android 16, sin garantizar todas las versiones ni las modificaciones de cada fabricante.
+Actualmente necesita Linux/PipeWire, cable USB y depuración USB. No ofrece audio simultáneo en ambos sentidos, interfaz gráfica para la PC ni transporte Wi-Fi. Los formatos emitidos son fijos a 48 kHz estéreo. La latencia tiene el piso del hardware y el jitter del transporte elegido; el buffer puede crecer con los cortes y los descartes pueden producir un salto audible. El perfil **Mínima** corta varias veces por minuto en teléfonos con jitter USB alto (medido: ~9 por minuto en el moto g play). El piso que queda lo ponen la salida del teléfono (unos 23 ms de mezclador y HAL en el moto) y el jitter con que el teléfono recibe los bloques USB; dar tiempo real al hilo de envío de la PC no lo redujo. La captura usa APIs internas; se verificó en Android 11 y Android 16, sin garantizar todas las versiones ni las modificaciones de cada fabricante.
 
 Ideas para una **v2**, todavía no implementadas:
 
