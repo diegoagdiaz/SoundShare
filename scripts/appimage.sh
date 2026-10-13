@@ -30,5 +30,7 @@ fi
     "$image" bash /source/packaging/appimage/build.sh
 cp -- "$build_dir/SoundShare-x86_64.AppImage" "$root/dist/SoundShare-x86_64.AppImage"
 cp -- "$root/android/app/build/outputs/apk/debug/app-debug.apk" "$root/dist/SoundShare.apk"
+# La copia versionada en la raíz es la que instala ./soundshare desde el repo.
+cp -- "$root/android/app/build/outputs/apk/debug/app-debug.apk" "$root/SoundShare.apk"
 "$root/scripts/checksums.sh"
 printf 'AppImage listo: %s/dist/SoundShare-x86_64.AppImage\n' "$root"

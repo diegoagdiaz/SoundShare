@@ -29,6 +29,9 @@ use engine::Engine;
 use hub::Hub;
 use protocol::{Mode, PORT};
 
+const REQUIRED_APP_VERSION_CODE: u32 = 4;
+const REQUIRED_APP_VERSION_NAME: &str = "0.3.0";
+
 struct Args {
     serial: Option<String>,
     output: Option<String>,
@@ -44,6 +47,10 @@ fn usage() -> ! {
 Uso:
   soundshare [pc2phone|phone2pc] [-s SERIAL] [-p PUERTO] [-o SALIDA]
   soundshare install [ruta.apk] [-s SERIAL]
+
+Al conectar, instala o actualiza la app a la versión requerida si encuentra la APK.
+Activá y autorizá la depuración USB en el teléfono.
+SOUNDSHARE_NO_AUTO_INSTALL=1 desactiva la instalación automática.
 
   -o SALIDA  dónde suena el audio del teléfono (node.name de PipeWire,
              ver «pactl list short sinks»); por defecto, la salida actual
@@ -149,6 +156,39 @@ fn install(adb: &Adb, serial: Option<&str>, apk: Option<PathBuf>) -> ! {
     }
 }
 
+/// Comprueba la versión una sola vez por cable; devuelve si podemos abrir la app.
+fn prepare_app(adb: &Adb, serial: &str) -> std::io::Result<bool> {
+    let installed = adb.installed_version_code(serial)?;
+    if installed == Some(REQUIRED_APP_VERSION_CODE) {
+        return Ok(true);
+    }
+    let disabled = std::env::var("SOUNDSHARE_NO_AUTO_INSTALL").as_deref() == Ok("1");
+    let apk = if disabled { None } else { default_apk() };
+    let Some(apk) = apk else {
+        if let Some(version) = installed {
+            println!("⚠ La app instalada tiene versionCode={version}; esta PC necesita {REQUIRED_APP_VERSION_CODE} ({REQUIRED_APP_VERSION_NAME}). Instalá la APK correspondiente y reconectá el cable (también podés usar «soundshare install»).");
+        } else {
+            println!("⚠ Instalá SoundShare.apk en el teléfono y reconectá el cable (también podés usar «soundshare install»).");
+        }
+        if disabled {
+            println!("  Instalación automática desactivada (SOUNDSHARE_NO_AUTO_INSTALL=1).");
+        }
+        return Ok(installed.is_some());
+    };
+    println!("  Instalando SoundShare {REQUIRED_APP_VERSION_NAME} en el teléfono…");
+    if let Err(e) = adb.install(serial, &apk) {
+        eprintln!("⚠ No pude instalar SoundShare: {e}");
+        eprintln!("  Autorizá la instalación por USB y usá «soundshare install»; si la firma es distinta, ejecutá «adb uninstall com.soundshare» (borra los datos) y reconectá el cable.");
+        return Ok(installed.is_some());
+    }
+    match adb.installed_version_code(serial) {
+        Ok(Some(REQUIRED_APP_VERSION_CODE)) => println!("✓ App actualizada"),
+        Ok(_) => eprintln!("⚠ La APK encontrada ({}) no es la versión {REQUIRED_APP_VERSION_CODE}; recompilá con ./scripts/build.sh", apk.display()),
+        Err(e) => eprintln!("⚠ Instalé la APK, pero no pude comprobar su versión: {e}. Revisá el teléfono y reconectá el cable."),
+    }
+    Ok(true)
+}
+
 /// Vigila el cable: cuando aparece el teléfono abre el túnel, cuando se va apaga todo.
 fn watch_devices(hub: Arc<Hub>, adb: Adb, serial: Option<String>, port: u16, start_mode: Option<Mode>) {
     let mut current: Option<adb::Device> = None;
@@ -194,8 +234,11 @@ fn watch_devices(hub: Arc<Hub>, adb: Adb, serial: Option<String>, port: u16, sta
             match &ready {
                 Some(d) => {
                     // Una sola conmutación por conexión de cable, antes de reverse/CONTROL/CAPTURE.
+                    let mut checked = None;
                     if attempted.as_deref() != Some(&d.serial) {
                         attempted = Some(d.serial.clone());
+                        // Instalar antes de AOA: sin una app que atienda el accesorio, Android muestra la URI.
+                        checked = Some(prepare_app(&adb, &d.serial));
                         if std::env::var("SOUNDSHARE_PLAYER_TRANSPORT").as_deref() != Ok("adb") {
                             match aoa::prepare(&d.serial) {
                                 Ok(link) => { hub.set_aoa(Some(link.clone())); link.run(Arc::downgrade(&hub)); }
@@ -216,8 +259,10 @@ fn watch_devices(hub: Arc<Hub>, adb: Adb, serial: Option<String>, port: u16, sta
                             refresh_reverse = false;
                             warned.clear();
                             hub.device_changed(ready.clone());
-                            match adb.package_path(&d.serial) {
-                                Ok(Some(_)) => {
+                            // Rehacer reverse tras AOA no habilita otro intento de instalación.
+                            let app_ready = checked.unwrap_or_else(|| adb.package_path(&d.serial).map(|p| p.is_some()));
+                            match app_ready {
+                                Ok(true) => {
                                     println!("  Abriendo SoundShare: elegí el sentido del audio en el teléfono (o acá: 1 / 2).");
                                     if let Err(e) = adb.start_app(&d.serial) {
                                         eprintln!("⚠ No pude abrir la app: {e}. Abrí SoundShare en el teléfono.");
@@ -226,7 +271,7 @@ fn watch_devices(hub: Arc<Hub>, adb: Adb, serial: Option<String>, port: u16, sta
                                         hub.set_mode(m);
                                     }
                                 }
-                                Ok(None) => println!("⚠ Instalá SoundShare.apk en el teléfono y reconectá el cable (también podés usar «soundshare install»)."),
+                                Ok(false) => {},
                                 Err(e) => eprintln!("⚠ No pude comprobar la app: {e}. Revisá el teléfono y reconectá el cable."),
                             }
                         }
@@ -237,7 +282,7 @@ fn watch_devices(hub: Arc<Hub>, adb: Adb, serial: Option<String>, port: u16, sta
                     println!("○ Teléfono desconectado");
                     current = None;
                     attempted = None;
-                    hub.set_aoa(None);
+                            hub.set_aoa(None);
                     hub.device_changed(None);
                 }
             }
@@ -314,6 +359,20 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn required_app_version_matches_android() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../android/app/build.gradle.kts");
+        let gradle = std::fs::read_to_string(path).expect("No pude leer la versión de Android");
+        let version = |key: &str| {
+            gradle.lines().find_map(|line| {
+                let (name, value) = line.trim().split_once('=')?;
+                (name.trim() == key).then(|| value.trim())
+            }).unwrap_or_else(|| panic!("Falta {key} en build.gradle.kts"))
+        };
+        assert_eq!(REQUIRED_APP_VERSION_CODE, version("versionCode").parse::<u32>().unwrap());
+        assert_eq!(REQUIRED_APP_VERSION_NAME, version("versionName").trim_matches('"'));
+    }
 
     fn device(serial: &str, state: &str) -> adb::Device {
         adb::Device { serial: serial.into(), state: state.into(), model: "Android".into() }
