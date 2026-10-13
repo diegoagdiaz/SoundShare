@@ -24,7 +24,7 @@ def summarize(logcat, hub):
     sessions = []
     current = None
     for line in logcat.splitlines():
-        if re.search(r"transporte=\w+, pista:", line):
+        if re.search(r"transporte=\w+, (?:perfil=\w+, )?pista:", line):
             current = []
             sessions.append(current)
         match = re.search(r"diag: transporte=(\w+), hueco máx (\d+) µs, cola mín (-?\d+), objetivo (\d+), cortes (\d+)", line)

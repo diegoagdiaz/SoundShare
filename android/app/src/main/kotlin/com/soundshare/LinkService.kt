@@ -57,8 +57,9 @@ class LinkService : Service() {
         super.onCreate()
         instance = this
         createChannel()
-        transportPreference = TransportChoice.parse(getSharedPreferences("player", Context.MODE_PRIVATE)
-            .getString("transport", "aoa") ?: "aoa") ?: TransportChoice.AOA
+        val prefs = getSharedPreferences("player", Context.MODE_PRIVATE)
+        transportPreference = TransportChoice.parse(prefs.getString("transport", "aoa") ?: "aoa") ?: TransportChoice.AOA
+        latencyProfile = LatencyProfile.parse(prefs.getString("latency", null)) ?: LatencyProfile.STABLE
         playerCandidate = TransportCandidate(TransportChoice.ADB)
         accessory = AccessoryTransport(this) {
             main.post {
@@ -88,6 +89,13 @@ class LinkService : Service() {
         transportPreference = choice
         if (choice == TransportChoice.AOA) accessory.prepare(explicit = true)
         send("TRANSPORT ${choice.wire}")
+        restartPlayer()
+        notifyChanged()
+    }
+
+    @Synchronized private fun selectLatency(profile: LatencyProfile) {
+        if (latencyProfile == profile) return
+        latencyProfile = profile
         restartPlayer()
         notifyChanged()
     }
@@ -242,7 +250,7 @@ class LinkService : Service() {
         }
         if (m == Mode.PC_TO_PHONE && player == null) {
             playerUsesAoa = shouldUseAoa()
-            player = Player(this, if (playerUsesAoa) accessory else null) { stats ->
+            player = Player(this, if (playerUsesAoa) accessory else null, latencyProfile) { stats ->
                 playerStats = stats
                 notifyChanged()
             }.also { it.start() }
@@ -362,6 +370,15 @@ class LinkService : Service() {
             private set
         @Volatile var accessoryState = AccessoryState.UNAVAILABLE
             private set
+
+        @Volatile var latencyProfile = LatencyProfile.STABLE
+            private set
+
+        /** Cambiar el perfil reinicia solo PLAYER; la PC no participa. */
+        fun requestLatency(context: Context, profile: LatencyProfile) {
+            context.getSharedPreferences("player", Context.MODE_PRIVATE).edit().putString("latency", profile.wire).apply()
+            instance?.selectLatency(profile) ?: run { latencyProfile = profile }
+        }
 
         fun requestTransport(context: Context, choice: TransportChoice) {
             context.getSharedPreferences("player", Context.MODE_PRIVATE).edit().putString("transport", choice.wire).apply()

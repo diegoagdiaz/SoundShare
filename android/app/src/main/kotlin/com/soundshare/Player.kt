@@ -24,7 +24,12 @@ import java.nio.ByteOrder
  * y la PC ajusta finamente su propio ritmo (resampler adaptativo de PipeWire) para que la cola
  * se quede en [target]. Así los dos relojes quedan enganchados sin cortes ni deriva.
  */
-class Player(private val context: Context, private val accessory: AccessoryTransport?, private val onStats: (Stats?) -> Unit) {
+class Player(
+    private val context: Context,
+    private val accessory: AccessoryTransport?,
+    private val profile: LatencyProfile,
+    private val onStats: (Stats?) -> Unit,
+) {
 
     data class Stats(
         val sampleRate: Int,
@@ -36,6 +41,7 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
         val socketFrames: Int = 0,
         val measuredAtNs: Long = System.nanoTime(),
         val transportName: String = "adb",
+        val minimal: Boolean = false,
     ) {
         private fun ms(frames: Int) = frames * 1000f / sampleRate
         val targetMs get() = ms(targetFrames)
@@ -150,11 +156,14 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
             // Puede cambiar en vivo: si la salida cambia (p. ej. se desconecta el Bluetooth),
             // Android recrea la pista por dentro y vuelve a pedirla rápida.
             var fast = track.performanceMode == AudioTrack.PERFORMANCE_MODE_LOW_LATENCY
-            // Arrancamos donde terminó la última sesión: el jitter del USB depende del teléfono y la PC.
+            val minimal = profile == LatencyProfile.MINIMAL
             val prefs = context.getSharedPreferences("player", Context.MODE_PRIVATE)
-            val learnedKey = if (transport == "adb") "target_ms_${fmt.sampleRate}" else "target_ms_aoa_${fmt.sampleRate}"
-            val initialMs = prefs.getFloat(learnedKey, INITIAL_TARGET_MS)
-            val target = QueueTarget(burst, fmt.sampleRate, capacity / 2, (initialMs * fmt.sampleRate / 1000).toInt())
+            // Arrancamos donde terminó la última sesión: el jitter del USB depende del teléfono y la PC.
+            // Cada perfil aprende por separado, así el mínimo no achica la cola del estable.
+            val learnedKey = (if (minimal) "target_ms_min_" else "target_ms_") +
+                (if (transport == "adb") "" else "aoa_") + fmt.sampleRate
+            val initialMs = prefs.getFloat(learnedKey, if (minimal) INITIAL_MINIMAL_TARGET_MS else INITIAL_TARGET_MS)
+            val target = QueueTarget(burst, fmt.sampleRate, capacity / 2, (initialMs * fmt.sampleRate / 1000).toInt(), profile)
             var bufferFrames = 0
             fun applyTarget() {
                 if (!run.active) return
@@ -169,14 +178,15 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
                 run.ifActive { prefs.edit().putFloat(learnedKey, target.frames * 1000f / fmt.sampleRate).apply() }
             }
             applyTarget()
-            run.ifActive { onStats(Stats(fmt.sampleRate, target.frames, 0, -1, 0, fast, transportName = transport)) }
-            Log.i(TAG, "transporte=$transport, pista: ${fmt.sampleRate} Hz, burst $burst, capacidad $capacity, rápida=$fast, objetivo ${target.frames}")
+            run.ifActive { onStats(Stats(fmt.sampleRate, target.frames, 0, -1, 0, fast, transportName = transport, minimal = minimal)) }
+            Log.i(TAG, "transporte=$transport, perfil=${profile.wire}, pista: ${fmt.sampleRate} Hz, burst $burst, capacidad $capacity, rápida=$fast, objetivo ${target.frames}")
 
             val buf = ByteArray(frameBytes * 1024)
             val direct = ByteBuffer.allocateDirect(buf.size).order(ByteOrder.nativeOrder())
             val silence = ByteBuffer.allocateDirect(burst * frameBytes)
             val status = ByteBuffer.allocate(Protocol.STATUS_BYTES)
             val ts = AudioTimestamp()
+            val trim = ExcessTrim(burst)
             var fill = 0
             var framesWritten = 0L
             var headTotal = 0L
@@ -304,7 +314,7 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
                     if (now - playStart > SETTLE_NS && target.onUnderrun(now, low)) {
                         applyTarget()
                         Log.i(TAG, "corte de audio → objetivo ${target.frames} frames")
-                    } else if (low >= burst) {
+                    } else if (!minimal && low >= burst) {
                         Log.i(TAG, "corte de la salida con $low frames en la pista: objetivo sin cambios")
                     }
                 }
@@ -312,11 +322,18 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
                 lowest = Int.MAX_VALUE
                 if (target.tick(now)) applyTarget()
                 val t = target.frames
-                // Si por un tirón del USB se acumuló mucho, descartamos el exceso de una vez:
-                // preferimos un salto corto a quedarnos con latencia de más.
-                if (dropFrames == 0L && queued > t + maxOf(t, fmt.sampleRate / 20)) {
-                    dropFrames = (queued - t).toLong()
-                    Log.i(TAG, "cola de $queued frames, descarto $dropFrames")
+                if (dropFrames == 0L) {
+                    // Latencia mínima: lo que se juntó tras un hueco del USB se descarta enseguida.
+                    val excess = if (minimal) trim.update(queued, t, now) else 0
+                    if (excess > 0) {
+                        dropFrames = excess.toLong()
+                        if (DIAG) Log.d(TAG, "latencia mínima: descarto $excess frames viejos")
+                    } else if (queued > t + maxOf(t, fmt.sampleRate / 20)) {
+                        // Si por un tirón del USB se acumuló mucho, descartamos el exceso de una vez:
+                        // preferimos un salto corto a quedarnos con latencia de más.
+                        dropFrames = (queued - t).toLong()
+                        Log.i(TAG, "cola de $queued frames, descarto $dropFrames")
+                    }
                 }
 
                 var outputLatency = -1
@@ -352,7 +369,7 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
                         // La pista recreada puede no conservar el tamaño de buffer que fijamos.
                         applyTarget()
                     }
-                    run.ifActive { onStats(Stats(fmt.sampleRate, target.frames, queued, outputLatency, underruns, fast, inSocket, transportName = transport)) }
+                    run.ifActive { onStats(Stats(fmt.sampleRate, target.frames, queued, outputLatency, underruns, fast, inSocket, transportName = transport, minimal = minimal)) }
                 }
             }
         } finally {
@@ -366,6 +383,7 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
         private const val TAG = "SoundShare.Player"
         /** Primer arranque en un teléfono nuevo: un valor típico del túnel de adb. */
         private const val INITIAL_TARGET_MS = 30f
+        private const val INITIAL_MINIMAL_TARGET_MS = 10f
         private const val STATUS_PERIOD_NS = 10_000_000L
         /** Lo primero tras arrancar el parlante no cuenta (Android tarda en despertar el hardware). */
         private const val SETTLE_NS = 700_000_000L
