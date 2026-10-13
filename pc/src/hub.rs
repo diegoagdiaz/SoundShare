@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::adb::{Adb, Device};
-use crate::player_transport::PlayerTransport;
+use crate::player_transport::{self, PlayerTransport, TransportChoice, TransportReason};
 use crate::control::RateLoop;
 use crate::engine::{self, Cmd, Engine, SINK_FORMAT, SinkShared, SourceShared};
 use crate::protocol::{self, Format, Mode, PlayerStatus, Role};
@@ -253,23 +253,47 @@ impl Hub {
 
     /// Si la app cerró su lado del accesorio (se reinició o se reinstaló), el cable sigue en modo
     /// AOA: reabrimos la interfaz sin conmutar para que PLAYER no se quede en adb.
-    fn reopen_aoa(self: &Arc<Self>) {
+    fn reopen_aoa(self: &Arc<Self>, explicit: bool) -> TransportReason {
         let _opening = self.aoa_open.lock().unwrap();
         let serial = {
             let mut st = self.st.lock().unwrap();
-            if !st.aoa.as_ref().is_some_and(|a| !a.alive()) { return; }
-            let Some(serial) = st.device.as_ref().map(|d| d.serial.clone()) else { return };
-            // Soltar la interfaz reclamada antes de volver a abrirla.
+            if st.shutting_down { return TransportReason::Disconnected; }
+            if st.aoa.as_ref().is_some_and(|a| a.alive()) { return TransportReason::Unavailable; }
+            let Some(serial) = st.device.as_ref().map(|d| d.serial.clone()) else { return TransportReason::Disconnected };
+            if st.aoa.is_none() && !explicit { return TransportReason::Unavailable; }
+            // stop libera el handle aunque el lector o sesiones conserven Arc<Link>.
             if let Some(old) = st.aoa.take() { old.stop(); }
             serial
         };
         match crate::aoa::reopen(&serial) {
             Ok(link) => {
-                println!("  AOA: la app volvió a conectarse; accesorio reabierto.");
-                self.set_aoa(Some(link.clone()));
+                let mut st = self.st.lock().unwrap();
+                if st.shutting_down || st.device.as_ref().map(|d| &d.serial) != Some(&serial) {
+                    link.stop();
+                    return TransportReason::Disconnected;
+                }
+                println!("  AOA: accesorio reabierto sin conmutar USB.");
+                st.aoa = Some(link.clone());
+                drop(st);
                 link.run(Arc::downgrade(self));
+                TransportReason::Unavailable // Sólo se usa si el enlace deja de estar vivo.
             }
-            Err(e) => eprintln!("⚠ No pude reabrir AOA: {e}. PLAYER por adb."),
+            Err(e) => {
+                eprintln!("⚠ No pude reabrir AOA: {e}. PLAYER por adb.");
+                if e.kind() == ErrorKind::Unsupported { TransportReason::Reconnect }
+                else { TransportReason::Unavailable }
+            }
+        }
+    }
+
+    fn request_transport(self: &Arc<Self>, id: u64, choice: TransportChoice) {
+        let reason = if choice == TransportChoice::Aoa { self.reopen_aoa(true) }
+            else { TransportReason::Unavailable };
+        let mut st = self.st.lock().unwrap();
+        let line = player_transport::advertisement(choice, st.aoa.as_ref().is_some_and(|a| a.alive()), reason);
+        // Responder al solicitante; no cambiar modo/sink ni cerrar el accesorio al elegir adb.
+        if let Some((_, writer)) = st.controls.iter_mut().find(|(cid, _)| *cid == id) {
+            let _ = writer.write_all(format!("{line}\n").as_bytes());
         }
     }
 
@@ -309,13 +333,17 @@ impl Hub {
         let id = self.id();
         let Ok(writer) = sock.try_clone() else { return };
         let _ = writer.set_write_timeout(Some(Duration::from_secs(1)));
-        self.reopen_aoa();
+        let reason = self.reopen_aoa(false);
         {
             let mut st = self.st.lock().unwrap();
             if st.shutting_down { return; }
             st.controls.push((id, writer));
-            let transport = if st.aoa.as_ref().is_some_and(|a| a.alive()) { "aoa" } else { "adb" };
-            self.broadcast(&mut st, &format!("PLAYER_TRANSPORT {transport}"));
+            let line = player_transport::advertisement(TransportChoice::Aoa,
+                st.aoa.as_ref().is_some_and(|a| a.alive()), reason);
+            // El anuncio inicial va sólo a esta app, para no pisar el selector de otro CONTROL.
+            if let Some((_, writer)) = st.controls.iter_mut().find(|(cid, _)| *cid == id) {
+                let _ = writer.write_all(format!("{line}\n").as_bytes());
+            }
             let line = format!("STATE {}", st.mode.wire());
             self.broadcast(&mut st, &line);
         }
@@ -333,6 +361,9 @@ impl Hub {
                     Some(m) => self.set_mode(m),
                     None => eprintln!("✗ Modo desconocido desde el teléfono: {arg}"),
                 },
+                "TRANSPORT" => {
+                    if let Some(choice) = TransportChoice::parse(arg) { self.request_transport(id, choice); }
+                }
                 "PING" => {
                     if let Ok(token) = arg.parse::<u64>() {
                         let mut st = self.st.lock().unwrap();

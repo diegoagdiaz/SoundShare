@@ -58,7 +58,7 @@ pub fn reopen(serial: &str) -> io::Result<Arc<Link>> {
     let handle = selected(serial)?;
     let d = handle.device().device_descriptor().map_err(usb_error)?;
     if (d.vendor_id(), d.product_id()) != (0x18d1, 0x2d01) {
-        return Err(io::Error::other("el cable ya no está en modo accesorio"));
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "el cable ya no está en modo accesorio"));
     }
     drop(handle);
     prepare(serial)

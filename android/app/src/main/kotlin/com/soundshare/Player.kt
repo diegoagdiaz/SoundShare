@@ -24,7 +24,7 @@ import java.nio.ByteOrder
  * y la PC ajusta finamente su propio ritmo (resampler adaptativo de PipeWire) para que la cola
  * se quede en [target]. Así los dos relojes quedan enganchados sin cortes ni deriva.
  */
-class Player(private val context: Context, private val accessory: AccessoryTransport?, private val onStats: (Stats) -> Unit) {
+class Player(private val context: Context, private val accessory: AccessoryTransport?, private val onStats: (Stats?) -> Unit) {
 
     data class Stats(
         val sampleRate: Int,
@@ -71,6 +71,7 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
             } catch (e: Exception) {
                 if (run.active) Log.e(TAG, "error en el reproductor", e)
             }
+            run.ifActive { onStats(null) }
             if (run.active) SystemClock.sleep(300)
         }
     }
@@ -165,6 +166,7 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
                 run.ifActive { prefs.edit().putFloat(learnedKey, target.frames * 1000f / fmt.sampleRate).apply() }
             }
             applyTarget()
+            run.ifActive { onStats(Stats(fmt.sampleRate, target.frames, 0, -1, 0, fast, transportName = transport)) }
             Log.i(TAG, "transporte=$transport, pista: ${fmt.sampleRate} Hz, burst $burst, capacidad $capacity, rápida=$fast, objetivo ${target.frames}")
 
             val buf = ByteArray(frameBytes * 1024)

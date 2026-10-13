@@ -3,6 +3,31 @@ use crate::aoa::Session;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 
+
+/// Preferencia opcional por CONTROL; las sesiones PLAYER siguen decidiendo el transporte real.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransportChoice { Aoa, Adb }
+impl TransportChoice {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value { "aoa" => Some(Self::Aoa), "adb" => Some(Self::Adb), _ => None }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransportReason { Reconnect, Unavailable, Disconnected }
+impl TransportReason {
+    fn wire(self) -> &'static str {
+        match self { Self::Reconnect => "reconnect", Self::Unavailable => "unavailable", Self::Disconnected => "disconnected" }
+    }
+}
+/// No conmutar desde CONTROL: reenumerar cortaría adb y podría apagar el modo o CAPTURE.
+pub fn advertisement(choice: TransportChoice, aoa_alive: bool, reason: TransportReason) -> String {
+    match choice {
+        TransportChoice::Adb => "PLAYER_TRANSPORT adb selected".into(),
+        TransportChoice::Aoa if aoa_alive => "PLAYER_TRANSPORT aoa".into(),
+        TransportChoice::Aoa => format!("PLAYER_TRANSPORT adb {}", reason.wire()),
+    }
+}
+
 pub enum PlayerTransport {
     Adb(TcpStream),
     Aoa(Session),

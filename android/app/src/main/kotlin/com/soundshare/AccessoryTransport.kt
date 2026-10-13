@@ -14,10 +14,15 @@ import java.io.*
 import java.util.concurrent.atomic.AtomicInteger
 
 /** Descriptor persistente por cable; los modos abren sesiones lógicas, no lectores USB nuevos. */
-class AccessoryTransport(private val context: Context, private val onReady: () -> Unit) {
+class AccessoryTransport(private val context: Context, private val onChanged: () -> Unit) {
     private val usb = context.getSystemService(UsbManager::class.java)
     // Un pedido por cable; UsbAccessory.equals() lee la serie y sin permiso lanza SecurityException.
     private var requested = false
+    @Volatile var state = AccessoryState.UNAVAILABLE
+        private set
+    private fun updateState(value: AccessoryState) {
+        if (state != value) { state = value; onChanged() }
+    }
     private class Link(val descriptor: ParcelFileDescriptor, val output: OutputStream)
     private var link: Link? = null
     private var current: Session? = null
@@ -29,10 +34,14 @@ class AccessoryTransport(private val context: Context, private val onReady: () -
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 PERMISSION -> if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED,false)) {
-                    prepare(); onReady()
-                } else Log.i(TAG,"permiso AOA rechazado; PLAYER sigue por adb")
+                    prepare()
+                } else synchronized(this@AccessoryTransport) {
+                    updateState(AccessoryState.PERMISSION_DENIED)
+                    Log.i(TAG,"permiso AOA rechazado; PLAYER sigue por adb")
+                }
                 UsbManager.ACTION_USB_ACCESSORY_DETACHED -> synchronized(this@AccessoryTransport) {
                     release(); requested = false; failed = false
+                    updateState(AccessoryState.DISCONNECTED)
                 }
             }
         }
@@ -43,12 +52,16 @@ class AccessoryTransport(private val context: Context, private val onReady: () -
         else context.registerReceiver(receiver,filter)
     }
 
-    @Synchronized fun prepare() {
-        if (closed || failed || link != null) return
-        val accessory = usb.accessoryList?.firstOrNull { it.manufacturer == "SoundShare" && it.model == "SoundShare" && it.version == "1" } ?: return
+    @Synchronized fun prepare(explicit: Boolean = false) {
+        if (closed) return
+        if (explicit) { requested = false; failed = false }
+        if (failed || link != null) return
+        val accessory = usb.accessoryList?.firstOrNull { it.manufacturer == "SoundShare" && it.model == "SoundShare" && it.version == "1" }
+        if (accessory == null) { updateState(AccessoryState.UNAVAILABLE); return }
         if (!usb.hasPermission(accessory)) {
             if (!requested) {
                 requested = true
+                updateState(AccessoryState.PERMISSION_REQUIRED)
                 // El sistema rellena los extras del resultado. Intent explícito, sólo para esta app.
                 val permission = PendingIntent.getBroadcast(context,0,Intent(PERMISSION).setPackage(context.packageName),
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
@@ -84,12 +97,13 @@ class AccessoryTransport(private val context: Context, private val onReady: () -
                     }
                 } finally {
                     synchronized(this) {
-                        if (link === opened) { failed = true; release() }
+                        if (link === opened) { failed = true; release(); updateState(AccessoryState.FAILED) }
                     }
                 }
             },"ss-accessory-read").apply { isDaemon = true; start() }
+            updateState(AccessoryState.READY)
             Log.i(TAG,"accesorio abierto; lecturas USB de 16384 bytes")
-        } catch (e: Exception) { failed = true; release(); Log.w(TAG,"AOA no disponible: ${e.message}") }
+        } catch (e: Exception) { failed = true; release(); updateState(AccessoryState.FAILED); Log.w(TAG,"AOA no disponible: ${e.message}") }
     }
 
     @Synchronized fun connect(): Session? {
@@ -101,7 +115,7 @@ class AccessoryTransport(private val context: Context, private val onReady: () -
     }
     @Synchronized fun disable(session: Session) {
         if (current !== session) return
-        failed = true; release()
+        failed = true; release(); updateState(AccessoryState.FAILED)
     }
     private fun send(kind: Int, session: Session, opened: Link, payload: ByteArray) {
         val bytes = AccessoryFrame.encode(kind,session.id,payload)

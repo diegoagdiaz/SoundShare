@@ -23,4 +23,22 @@
     <string name="status_phone_to_pc">Enviando el audio del teléfono a la PC</string>
     <string name="notif_channel">Transmisión de audio</string>
     <string name="notif_quit">Salir</string>
+    <string name="transport_title">Transporte PC → Móvil</string>
+    <string name="transport_aoa">AOA (menor latencia)</string>
+    <string name="transport_adb">adb</string>
+    <string name="transport_selected">%1$s, seleccionado</string>
+    <string name="transport_actual">Audio por %1$s</string>
+    <string name="transport_inactive">Sin reproducción PC → Móvil</string>
+    <string name="transport_connecting">Conectando audio…</string>
+    <string name="transport_hint_waiting">La preferencia queda guardada hasta que se conecte la PC.</string>
+    <string name="transport_hint_idle">AOA listo para reproducir.</string>
+    <string name="transport_hint_connecting">Esperando la sesión AOA; si falla, se usa adb.</string>
+    <string name="transport_hint_active">AOA activo, con menor latencia USB.</string>
+    <string name="transport_hint_adb">Elegiste adb para el audio PC → Móvil.</string>
+    <string name="transport_hint_permission">AOA sin permiso USB; se usa adb mientras lo aceptás.</string>
+    <string name="transport_hint_denied">Rechazaste el permiso AOA; tocá AOA para pedirlo otra vez.</string>
+    <string name="transport_hint_unavailable">AOA no disponible; se usa adb. Tocá AOA para reintentar.</string>
+    <string name="transport_hint_failed">Falló el enlace AOA; se usa adb. Tocá AOA para reintentar.</string>
+    <string name="transport_hint_disconnected">Accesorio desconectado; se usa adb cuando vuelve el enlace.</string>
+    <string name="transport_hint_reconnect">Reconectá el cable y arrancá la PC con AOA habilitado.</string>
 </resources>

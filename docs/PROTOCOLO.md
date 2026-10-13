@@ -59,6 +59,8 @@ Después del hello, ambas direcciones intercambian líneas terminadas en `\n` (L
 | Dirección | Línea | Significado |
 | --- | --- | --- |
 | Teléfono → PC | `HELLO <fabricante> <modelo>\|<sdk>` | Identificación; el separador real es `|`, sin barra invertida |
+| Teléfono → PC | `TRANSPORT aoa` / `TRANSPORT adb` | Preferencia PLAYER; respuesta al solicitante, sin cambiar el modo |
+| PC → teléfono | `PLAYER_TRANSPORT aoa` / `PLAYER_TRANSPORT adb [motivo]` | Candidato PLAYER y motivo opcional del fallback |
 | Teléfono → PC | `MODE off` | Pedir apagado |
 | Teléfono → PC | `MODE pc2phone` | Pedir PC → Móvil |
 | Teléfono → PC | `MODE phone2pc` | Pedir Móvil → PC |
@@ -135,7 +137,15 @@ Si la cola supera `objetivo + max(objetivo, 50 ms)`, programa el descarte de `co
 
 El handshake físico sigue [AOA](https://source.android.com/docs/core/interaction/accessories/aoa): GET_PROTOCOL 51 (IN vendor, LE16), SEND_STRING 52 (OUT vendor, índice 0–5, UTF-8 con NUL) y START 53. Cadenas: manufacturer `SoundShare`, model `SoundShare`, description `Audio PC a Android`, version `1`, URI del repositorio y serial de adb. No se habilita AOA Audio: PCM continúa en nuestro PLAYER. Tras START se espera la misma serie USB en **18d1:2d01**, se reclama exclusivamente la interfaz ff/ff/00 del accesorio y se descubren sus endpoints bulk; la interfaz ff/42/01 de adb queda libre. No se repite SET_INTERFACE para el alt 0 ya activo: al reiniciar el hub con el fd Android abierto se debe conservar la lectura pendiente. Si sólo aparece 2d00, se rechaza como transporte: hace falta adb para CONTROL y CAPTURE.
 
-El Hub informa `PLAYER_TRANSPORT aoa` o `PLAYER_TRANSPORT adb` por CONTROL **antes de STATE**. Es un candidato: Android usa adb si no puede abrir AOA o si falta permiso. Clientes antiguos ignoran esta línea y siguen por adb. No se cambia la versión del protocolo interno 1 ni se agregan campos en sus bytes reservados.
+El Hub informa `PLAYER_TRANSPORT aoa` o `PLAYER_TRANSPORT adb [motivo]` al nuevo CONTROL **antes de STATE**. Es un candidato: Android usa adb si no puede abrir AOA o si falta permiso. La app guarda en SharedPreferences una preferencia `aoa` (predeterminada) o `adb`, y al conectar y al tocar el selector manda `TRANSPORT aoa` o `TRANSPORT adb`. La respuesta va sólo al solicitante; no altera el modo, el sink ni CAPTURE. Un argumento de transporte desconocido se ignora.
+
+`TRANSPORT adb` responde `PLAYER_TRANSPORT adb selected`: el teléfono reinicia únicamente PLAYER y abre su socket aunque el accesorio siga vivo. `TRANSPORT aoa` intenta reabrir la interfaz si el Link murió o falta; antes libera el handle anterior, incluso si el lector o sesiones conservan referencias. Sólo reabre USB ya en **18d1:2d01**, sin volver a seleccionar alt 0. Si está disponible responde `PLAYER_TRANSPORT aoa`; si falla responde `PLAYER_TRANSPORT adb unavailable`, `adb disconnected` (sin dispositivo vigente) o `adb reconnect` (el USB no está en modo accesorio). La app usa el candidato junto con su preferencia; una respuesta de fallback no cambia la preferencia guardada.
+
+La selección AOA prepara/pide permiso Android. Hay un pedido automático por conexión del cable; un toque explícito sobre AOA puede volver a pedirlo tras un rechazo y reintentar un descriptor fallido. Al concederlo se reinicia sólo PLAYER. El transporte mostrado proviene de `Player.Stats.transportName`, no del candidato del Hub, y el motivo de fallback combina CONTROL y el estado local USB. Detener/reiniciar o cambiar de transporte cancela irreversiblemente la generación anterior, pausa su pista y cierra únicamente sus recursos; un lector tardío no puede revivir ni publicar sobre el arranque nuevo.
+
+**CONTROL nunca hace START/conmutación completa**: reenumerar corta adb, puede apagar PC → Móvil al perder CONTROL y puede interrumpir CAPTURE. Para `reconnect`, la app indica «Reconectá el cable y arrancá la PC con AOA habilitado». Si se arrancó con `SOUNDSHARE_PLAYER_TRANSPORT=adb`, primero hay que reiniciar el Hub sin esa variable (o con `aoa`) y reconectar; la conmutación se hace en el flujo inicial previo a reverse/CONTROL. Elegir adb en la app no cambia el modo físico del USB.
+
+Clientes anteriores ignoran `TRANSPORT`/`PLAYER_TRANSPORT` desconocidos y siguen por adb; la app acepta anuncios antiguos sin motivo. No se cambia la versión del protocolo interno 1 ni se agregan campos en sus bytes reservados.
 
 Cada mensaje AOA en ambas direcciones contiene:
 
@@ -155,11 +165,11 @@ HELLO lleva los mismos 8 bytes `SNDS`/1/PLAYER, de Android a PC. FORMAT lleva lo
 
 Android siempre lee el fd con un buffer de **16384 bytes**, aunque el parser pida uno o doce. Un hilo daemon con prioridad de audio mantiene ese lector durante toda la conexión; separa los payloads en una cola acotada de la sesión activa. `available()` cuenta sólo payload pendiente, sin cabeceras ni padding. La PC tiene una lectura bulk IN persistente con timeout de 200 ms y una cola acotada de estados. Se ignoran mensajes de una sesión anterior.
 
-Detener, cambiar de modo o reemplazar PLAYER envía END y despierta el lector lógico. La próxima sesión envía un nuevo HELLO con otro ID; conserva el accesorio abierto. Cerrar el servicio/desconectar termina las colas y cierra el descriptor en un hilo daemon, sin join del lector físico: algunas versiones no desbloquean `read()` al cerrar el fd. Las escrituras de END de Android también son daemon. La PC limita escrituras a 500 ms y el estado a 3 s; Android limita la espera lógica de formato/PCM a 3 s. Fallos de apertura, framing o transferencia inhiben el accesorio hasta reconectar y permiten reintentar PLAYER por adb. Rechazar el permiso no repite el diálogo en cada intento.
+Detener, cambiar de modo o reemplazar PLAYER envía END y despierta el lector lógico. La próxima sesión envía un nuevo HELLO con otro ID; conserva el accesorio abierto. Cerrar el servicio/desconectar termina las colas y cierra el descriptor en un hilo daemon, sin join del lector físico: algunas versiones no desbloquean `read()` al cerrar el fd. Las escrituras de END de Android también son daemon. La PC limita escrituras a 500 ms y el estado a 3 s; Android limita la espera lógica de formato/PCM a 3 s. Fallos de apertura, framing o transferencia inhiben el accesorio hasta reconectar o tocar explícitamente AOA y permiten reintentar PLAYER por adb. Rechazar el permiso no repite el diálogo en cada intento.
 
 El resampler y RateLoop no cambian: el estado AOA pasa por el mismo lazo del Hub. Se conservan dos bursts mínimos y una política adaptativa común. AOA tiene su propio objetivo persistido, de modo que no hereda el jitter de adb.
 
-El PING/PONG de CONTROL **sigue midiendo adb**. La app marca desconocida esa etapa USB cuando PLAYER usa AOA, en lugar de presentar la mitad del RTT de adb como una medición del accesorio. El hub conserva su aproximación cuántum + máximo de cola/salida Android; no mide propagación USB ni latencia acústica.
+El PING/PONG de CONTROL **sigue midiendo adb**. La app usa **0 ms aproximados** para esa etapa USB cuando PLAYER usa AOA; no presenta la mitad del RTT de adb como una medición del accesorio. Ese cero no mide propagación física ni constituye una medición acústica. El hub conserva su aproximación cuántum + máximo de cola/salida Android; no mide propagación USB ni latencia acústica.
 
 ## CAPTURE: Móvil → PC
 
