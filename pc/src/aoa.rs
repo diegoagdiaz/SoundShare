@@ -141,9 +141,14 @@ pub fn prepare(serial: &str) -> io::Result<Arc<Link>> {
                 handle
                     .claim_interface(alt.interface_number())
                     .map_err(usb_error)?;
-                handle
-                    .set_alternate_setting(alt.interface_number(), alt.setting_number())
-                    .map_err(usb_error)?;
+                // SET_INTERFACE(0) vuelve a activar f_accessory y puede perder el request
+                // pendiente del fd Android ya abierto al reiniciar el hub. El alt 0 activo
+                // no necesita reinicialización; sólo seleccionamos otro si existe.
+                if alt.setting_number() != 0 {
+                    handle
+                        .set_alternate_setting(alt.interface_number(), alt.setting_number())
+                        .map_err(usb_error)?;
+                }
                 println!(
                     "  AOA accesible sin root: interfaz {}, bulk IN {input:#x}, OUT {output:#x}",
                     alt.interface_number()
