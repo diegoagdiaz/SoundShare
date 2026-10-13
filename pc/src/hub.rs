@@ -52,6 +52,8 @@ struct State {
     capture_child: Option<(u64, Child)>,
     capture_launch: Option<u64>,
     show_stats: bool,
+    /// Edad del último PCM leído en Android, antes de enviarlo por USB.
+    capture_latency_ms: Option<(f64, Instant)>,
 }
 
 impl Hub {
@@ -142,6 +144,7 @@ impl Hub {
         }
         st.mode = Mode::Off;
         st.capture_launch = None;
+        st.capture_latency_ms = None;
     }
 
     fn start_pc_to_phone(&self, st: &mut State) -> Result<(), String> {
@@ -206,6 +209,16 @@ impl Hub {
         let mut reader = BufReader::new(out);
         while let Ok(Some(line)) = protocol::read_line(&mut reader) {
             let line = line.trim().to_string();
+            if let Some(value) = line.strip_prefix("[captura] LATENCY ") {
+                if let Ok(ms) = value.parse::<f64>() {
+                    let mut st = self.st.lock().unwrap();
+                    if st.capture_child.as_ref().is_some_and(|(cid, _)| *cid == id) {
+                        st.capture_latency_ms = (ms.is_finite() && (0.0..=5000.0).contains(&ms))
+                            .then_some((ms, Instant::now()));
+                    }
+                }
+                continue;
+            }
             if line.is_empty() {
                 continue;
             }
@@ -285,6 +298,14 @@ impl Hub {
                     Some(m) => self.set_mode(m),
                     None => eprintln!("✗ Modo desconocido desde el teléfono: {arg}"),
                 },
+                "PING" => {
+                    if let Ok(token) = arg.parse::<u64>() {
+                        let mut st = self.st.lock().unwrap();
+                        if let Some((_, writer)) = st.controls.iter_mut().find(|(cid, _)| *cid == id) {
+                            let _ = writer.write_all(format!("PONG {token}\n").as_bytes());
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -497,6 +518,28 @@ impl Hub {
                 println!("  {line} · {fps:.0} frames/s");
             }
             self.broadcast(&mut st, &format!("INFO PC: {line}"));
+            let latency = match st.mode {
+                Mode::PcToPhone => st.sink.as_ref().map(|s| {
+                    let rate = SINK_FORMAT.rate as f64;
+                    let queued = s.ring.len() as f64 / SINK_FORMAT.frame_bytes() as f64 / rate * 1000.0;
+                    let pipeline = s.pipeline_latency.load() as f64 * 1000.0;
+                    let device = if pipeline >= 0.0 {
+                        pipeline.max(s.quantum.load(Ordering::Relaxed) as f64 / rate * 1000.0)
+                    } else { -1.0 };
+                    format!("LATENCY pc2phone {queued:.3} {device:.3} -1")
+                }),
+                Mode::PhoneToPc => st.source.as_ref().map(|s| {
+                    let capture = st.capture_latency_ms
+                        .filter(|(_, received)| received.elapsed() < Duration::from_secs(3))
+                        .map_or(-1.0, |(ms, _)| ms);
+                    let pipeline = s.pipeline_latency.load() as f64;
+                    format!("LATENCY phone2pc {:.3} {:.3} {capture:.3}",
+                        s.level.load() as f64 * 1000.0,
+                        if pipeline >= 0.0 { pipeline * 1000.0 } else { -1.0 })
+                }),
+                Mode::Off => None,
+            };
+            if let Some(latency) = latency { self.broadcast(&mut st, &latency); }
         }
     }
 

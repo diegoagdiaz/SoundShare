@@ -3,11 +3,13 @@ package com.soundshare.capture
 import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
+import android.media.AudioTimestamp
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.Looper
 import android.os.Process
 import com.soundshare.Protocol
+import com.soundshare.LatencyEstimate
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -37,17 +39,19 @@ object CaptureMain {
         var port = Protocol.PORT
         var keepVolume = false
         var debug = false
+        var latency = false
         var i = 0
         while (i < args.size) {
             when (args[i]) {
                 "--port" -> port = args[++i].toInt()
                 "--keep-volume" -> keepVolume = true
                 "--debug" -> debug = true
+                "--latency" -> latency = true
             }
             i++
         }
         val code = try {
-            run(port, keepVolume, debug)
+            run(port, keepVolume, debug, latency)
             0
         } catch (e: Throwable) {
             log("error: $e")
@@ -58,7 +62,7 @@ object CaptureMain {
     }
 
     @SuppressLint("MissingPermission")
-    private fun run(port: Int, keepVolume: Boolean, debug: Boolean) {
+    private fun run(port: Int, keepVolume: Boolean, debug: Boolean, latency: Boolean) {
         if (Looper.getMainLooper() == null) Looper.prepareMainLooper()
         // En Android 11 su inicialización consulta recursos del contexto real del sistema.
         // Cargarlo antes de instalar el contexto mínimo del capturador evita esa consulta tardía.
@@ -89,7 +93,7 @@ object CaptureMain {
             }.apply { isDaemon = true }.start()
 
             runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO) }
-            pump(rec, out, debug)
+            pump(rec, out, debug, latency)
         } finally {
             runCatching { rec.stop() }
             rec.release()
@@ -98,7 +102,7 @@ object CaptureMain {
         }
     }
 
-    private fun pump(rec: AudioRecord, out: java.io.OutputStream, debug: Boolean) {
+    private fun pump(rec: AudioRecord, out: java.io.OutputStream, debug: Boolean, latency: Boolean) {
         val chunk = ByteArray(CHUNK_FRAMES * FRAME_BYTES)
         // REMOTE_SUBMIX suele entregar 1024 frames juntos. Pedir siempre 240 bloqueantes
         // retiene el resto hasta la siguiente entrega; esperamos solo un frame y drenamos
@@ -111,6 +115,9 @@ object CaptureMain {
         var maxGapNs = 0L
         var last = System.nanoTime()
         var window = last
+        val timestamp = AudioTimestamp()
+        var framesRead = 0L
+        var lastLatency = 0L
         while (!stopped) {
             val n = reader.readInto(chunk)
             if (n < 0) {
@@ -118,6 +125,19 @@ object CaptureMain {
                 throw IOException("AudioRecord.read = $n")
             }
             if (n == 0) continue
+            framesRead += n / FRAME_BYTES
+            val now = System.nanoTime()
+            if (latency && now - lastLatency >= 250_000_000L) {
+                lastLatency = now
+                val age = runCatching {
+                    if (rec.getTimestamp(timestamp, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS)
+                        // Edad del punto medio del bloque, no solo de su último frame recién llegado.
+                        LatencyEstimate.captureAgeMs(RATE, framesRead - n / FRAME_BYTES / 2,
+                            timestamp.framePosition, timestamp.nanoTime, System.nanoTime())
+                    else null
+                }.getOrNull()
+                log("LATENCY ${age ?: -1.0}")
+            }
             try {
                 out.write(chunk, 0, n)
             } catch (e: IOException) {

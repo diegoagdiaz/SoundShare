@@ -96,6 +96,8 @@ pub struct SinkShared {
     pub overruns: AtomicU32,
     /// Diagnóstico: mayor intervalo entre ciclos de PipeWire desde la última lectura (µs).
     pub max_cycle_us: AtomicU32,
+    /// Tiempo de PipeWire hasta el punto de captura, en segundos; -1 si no está disponible.
+    pub pipeline_latency: AtomicF32,
     last_cycle_ns: AtomicU64,
 }
 
@@ -118,6 +120,7 @@ impl SinkShared {
             quantum: AtomicU32::new(0),
             overruns: AtomicU32::new(0),
             max_cycle_us: AtomicU32::new(0),
+            pipeline_latency: AtomicF32(AtomicU32::new((-1.0f32).to_bits())),
             last_cycle_ns: AtomicU64::new(0),
         })
     }
@@ -137,6 +140,8 @@ pub struct SourceShared {
     pub quantum: AtomicU32,
     pub underruns: AtomicU32,
     pub overruns: AtomicU32,
+    /// Cola interna, resampler y salida de PipeWire, en segundos; -1 si no hay datos.
+    pub pipeline_latency: AtomicF32,
 }
 
 impl SourceShared {
@@ -152,6 +157,7 @@ impl SourceShared {
             quantum: AtomicU32::new(0),
             underruns: AtomicU32::new(0),
             overruns: AtomicU32::new(0),
+            pipeline_latency: AtomicF32(AtomicU32::new((-1.0f32).to_bits())),
         })
     }
 }
@@ -429,6 +435,19 @@ fn forced_rate() -> Option<f64> {
     std::env::var("SOUNDSHARE_FORCE_RATE").ok().and_then(|v| v.parse().ok())
 }
 
+/// Snapshot de tiempo real: sin locks ni reservas. Los buffers propios se cuentan aparte.
+fn pipeline_latency(stream: &pw::stream::Stream, sample_rate: u32, capture: bool) -> f32 {
+    let Ok(time) = stream.time() else { return -1.0 };
+    let rate = time.rate();
+    if time.now() <= 0 || rate.num == 0 || rate.denom == 0 { return -1.0; }
+    let elapsed = now_ns().saturating_sub(time.now() as u64) as f64 / 1e9;
+    let delay = time.delay() as f64 * rate.num as f64 / rate.denom as f64;
+    let device = (delay + if capture { elapsed } else { -elapsed }).max(0.0);
+    let buffered = time.buffered().saturating_add(time.queued()) as f64 / sample_rate as f64;
+    let latency = device + buffered;
+    if latency.is_finite() && (0.0..=5.0).contains(&latency) { latency as f32 } else { -1.0 }
+}
+
 // ---------------------------------------------------------------- PC → Móvil
 
 struct SinkData {
@@ -490,6 +509,7 @@ fn create_sink(core: &pw::core::CoreRc, shared: Arc<SinkShared>, errors: &mpsc::
 fn sink_process(stream: &pw::stream::Stream, d: &mut SinkData) {
     let frame = SINK_FORMAT.frame_bytes();
     let now = now_ns();
+    d.shared.pipeline_latency.store(pipeline_latency(stream, SINK_FORMAT.rate, true));
     let prev = d.shared.last_cycle_ns.swap(now, Ordering::Relaxed);
     if prev != 0 {
         d.shared.max_cycle_us.fetch_max(((now - prev) / 1000) as u32, Ordering::Relaxed);
@@ -602,6 +622,7 @@ fn create_source(
 
 /// Hilo de tiempo real: entrega a PipeWire exactamente lo que pide el resampler.
 fn source_process(stream: &pw::stream::Stream, d: &mut SourceData) {
+    d.shared.pipeline_latency.store(pipeline_latency(stream, d.shared.format.rate, false));
     let Some(mut buffer) = stream.dequeue_buffer() else { return };
     let requested = buffer.requested() as usize;
     let Some(data) = buffer.datas_mut().first_mut() else { return };

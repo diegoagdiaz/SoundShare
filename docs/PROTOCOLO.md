@@ -86,6 +86,20 @@ App Android                         PC / Hub
 
 Cerrar el último CONTROL durante PC → Móvil apaga el modo y restaura la salida de la PC. En Móvil → PC, cerrar CONTROL por sí solo no implica detener el capturador de shell. La acción **Salir** de la notificación envía `MODE off` y espera hasta 500 ms por `STATE off` antes de cerrar el servicio. Desconectar el dispositivo USB apaga el modo. Durante el apagado de la PC se rechazan nuevos pedidos y conexiones; el motor no admite inicios de streams después de `Quit`.
 
+### Telemetría opcional de latencia
+
+El protocolo 1 conserva el hello, formato, PCM y estado PLAYER originales. Agrega líneas opcionales de CONTROL; los clientes anteriores las ignoran:
+
+- `PING <token>`: Android envía su tiempo monótono en ns justo al escribir la línea, hasta una vez por segundo mientras hay audio.
+- `PONG <token>`: la PC responde exclusivamente al cliente que mandó ese token. Android acepta solo la respuesta pendiente y estima USB como la mitad del round trip; no compara relojes de dispositivos diferentes.
+- `LATENCY <modo> <cola_pc_ms> <pipewire_ms> <captura_android_ms>`: la PC informa valores decimales con punto cada segundo. `-1` significa desconocido. `pipewire_ms` incluye el tiempo hasta el dispositivo/grafo y el buffer del resampler; en PC → Móvil se usa al menos el cuántum observado. El tiempo de captura Android solo corresponde a Móvil → PC.
+
+La PC lanza el capturador con `--latency`. Cada 250 ms este informa por stdout `[captura] LATENCY <ms>`, calculado con `AudioRecord.getTimestamp(TIMEBASE_MONOTONIC)` y la posición del punto medio del bloque leído. No mezcla esta telemetría con el PCM. El Hub acepta esos datos solo del proceso de captura vigente y vence la medición tras 3 s.
+
+La app muestra una estimación por etapas. En PC → Móvil suma cola/grafo PC + tiempo de AudioTrack hasta salida + frames pendientes en el socket + USB aproximado. AudioTrack ya incluye su propia cola, que no se suma dos veces. Si no hay timestamp de salida, usa la cola como parte conocida y marca la salida desconocida. En Móvil → PC suma captura Android + promedio del ring PC + resampler/grafo/salida PC + USB aproximado. Los datos CONTROL/PONG vencen en 3 s; los del reproductor en 1,5 s. Cambiar de modo o desconectarse limpia la telemetría de la sesión anterior. No se deriva ninguna cifra del texto `INFO`.
+
+Esta estimación no es una medición acústica de extremo a extremo ni incluye los buffers de la aplicación original. La simetría del USB y los timestamps/reportes de los dispositivos tienen límites. Las etapas sin datos se identifican explícitamente como una estimación parcial, sin completar con constantes supuestas.
+
 ## PLAYER: PC → Móvil
 
 Solo se acepta cuando la PC está en `pc2phone` y tiene un sink. Un nuevo PLAYER reemplaza al anterior. La PC envía formato y luego PCM sin cabeceras hasta cerrar el socket. En paralelo, el teléfono envía bloques de estado de 16 bytes; el primero no necesita esperar a que se complete un bloque PCM específico.

@@ -39,6 +39,15 @@ class LinkService : Service() {
     private var player: Player? = null
     @Volatile private var quitting = false
     @Volatile private var offAck: CountDownLatch? = null
+    @Volatile private var pendingPing = 0L
+    @Volatile private var pingQueued = false
+    private val ping = object : Runnable {
+        override fun run() {
+            if (!running) return
+            sendPing()
+            main.postDelayed(this, 1000)
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -57,12 +66,16 @@ class LinkService : Service() {
         if (!running) {
             running = true
             controlThread = Thread(::controlLoop, "ss-control").also { it.start() }
+            main.post(ping)
         }
         return START_NOT_STICKY
     }
 
     @Synchronized override fun onDestroy() {
         running = false
+        main.removeCallbacks(ping)
+        pcLatency = null
+        transport = null
         controlOut = null
         runCatching { controlSocket?.close() }
         stopPlayer()
@@ -134,6 +147,9 @@ class LinkService : Service() {
                 applyMode(Mode.OFF)
                 updateNotification()
                 pcInfo = ""
+                pcLatency = null
+                transport = null
+                pendingPing = 0L
                 notifyChanged()
             }
             if (running) SystemClock.sleep(1000)
@@ -150,6 +166,18 @@ class LinkService : Service() {
                 if (it == Mode.OFF) offAck?.countDown()
             }
             "INFO" -> pcInfo = arg
+            "LATENCY" -> LatencyEstimate.parsePc(arg)?.takeIf { it.mode == mode }?.let {
+                pcLatency = TimedPc(it, System.nanoTime())
+            }
+            "PONG" -> {
+                val token = arg.toLongOrNull()
+                val now = System.nanoTime()
+                if (token != null && token > 0 && token == pendingPing) {
+                    val rtt = (now - token) / 1e6
+                    if (rtt in 0.0..3000.0) transport = TimedTransport(rtt, now)
+                    pendingPing = 0L
+                }
+            }
             "ERROR" -> lastError = arg
         }
         notifyChanged()
@@ -157,6 +185,11 @@ class LinkService : Service() {
 
     @Synchronized private fun applyMode(m: Mode) {
         if (m != Mode.OFF && (!running || quitting)) return
+        if (m != mode) {
+            pcLatency = null
+            pcInfo = ""
+            if (m == Mode.OFF) transport = null
+        }
         if (m != Mode.PC_TO_PHONE) {
             stopPlayer()
             playerStats = null
@@ -192,6 +225,33 @@ class LinkService : Service() {
             }
         } catch (_: RejectedExecutionException) {
             // El servicio ya está cerrando y no acepta más mensajes.
+        }
+    }
+
+    private fun sendPing() {
+        if (!connected || mode == Mode.OFF || quitting || pingQueued) return
+        if (pendingPing != 0L && System.nanoTime() - pendingPing < 3_000_000_000L) return
+        val out = controlOut ?: return
+        pingQueued = true
+        try {
+            writer.execute {
+                try {
+                    synchronized(out) {
+                        if (controlOut === out && running && connected) {
+                            val sent = System.nanoTime()
+                            pendingPing = sent
+                            out.write("PING $sent\n".toByteArray(Charsets.UTF_8))
+                            out.flush()
+                        }
+                    }
+                } catch (e: IOException) {
+                    pendingPing = 0L
+                } finally {
+                    pingQueued = false
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            pingQueued = false
         }
     }
 
@@ -259,6 +319,20 @@ class LinkService : Service() {
         @Volatile var lastError = ""
             private set
         @Volatile var quitRequested = false
+        private data class TimedPc(val value: LatencyEstimate.Pc, val received: Long)
+        private data class TimedTransport(val milliseconds: Double, val received: Long)
+        @Volatile private var pcLatency: TimedPc? = null
+        @Volatile private var transport: TimedTransport? = null
+
+        fun latencyEstimate(): LatencyEstimate.Value {
+            val now = System.nanoTime()
+            val pc = pcLatency?.takeIf { now - it.received < 3_000_000_000L }?.value
+            val rtt = transport?.takeIf { now - it.received < 3_000_000_000L }?.milliseconds
+            val player = playerStats?.takeIf { now - it.measuredAtNs < 1_500_000_000L }
+            return LatencyEstimate.calculate(mode, pc, player?.queuedMs?.toDouble(),
+                player?.takeIf { it.outputLatencyFrames >= 0 }?.outputLatencyMs?.toDouble(),
+                player?.socketMs?.toDouble() ?: 0.0, rtt)
+        }
 
         @Volatile private var instance: LinkService? = null
         private val main = Handler(Looper.getMainLooper())

@@ -33,11 +33,14 @@ class Player(private val context: Context, private val onStats: (Stats) -> Unit)
         val outputLatencyFrames: Int,
         val underruns: Int,
         val fastTrack: Boolean,
+        val socketFrames: Int = 0,
+        val measuredAtNs: Long = System.nanoTime(),
     ) {
         private fun ms(frames: Int) = frames * 1000f / sampleRate
         val targetMs get() = ms(targetFrames)
         val queuedMs get() = ms(queuedFrames)
         val outputLatencyMs get() = ms(outputLatencyFrames)
+        val socketMs get() = ms(socketFrames)
     }
 
     @Volatile private var running = false
@@ -232,7 +235,12 @@ class Player(private val context: Context, private val onStats: (Stats) -> Unit)
                 var outputLatency = -1
                 if (started && track.getTimestamp(ts)) {
                     val presented = ts.framePosition + (System.nanoTime() - ts.nanoTime) * fmt.sampleRate / 1_000_000_000L
-                    outputLatency = (framesWritten - presented).toInt()
+                    val pending = framesWritten - presented
+                    val timestampAge = System.nanoTime() - ts.nanoTime
+                    if (ts.nanoTime > 0 && timestampAge in 0..1_000_000_000L
+                        && presented >= 0 && pending in 0..Int.MAX_VALUE.toLong()) {
+                        outputLatency = pending.toInt()
+                    }
                 }
 
                 if (DIAG) {
@@ -249,7 +257,7 @@ class Player(private val context: Context, private val onStats: (Stats) -> Unit)
 
                 if (now - lastUi > UI_PERIOD_NS) {
                     lastUi = now
-                    onStats(Stats(fmt.sampleRate, target.frames, queued, outputLatency, underruns, fast))
+                    onStats(Stats(fmt.sampleRate, target.frames, queued, outputLatency, underruns, fast, inSocket))
                 }
             }
         } finally {
