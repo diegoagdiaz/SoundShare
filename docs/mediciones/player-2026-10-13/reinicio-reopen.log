@@ -1,0 +1,21 @@
+SoundShare 0.2.0 · esperando al teléfono por USB… (escribí «h» para ver los comandos)
+  AOA accesible sin root: interfaz 0, bulk IN 0x81, OUT 0x1
+● Teléfono conectado: moto g play  2021  (ZY22DVN9D2)
+  Abriendo SoundShare: elegí el sentido del audio en el teléfono (o acá: 1 / 2).
+● App conectada: motorola moto g play (2021) (Android API 30)
+▶ Modo: PC → Móvil
+  Audio de la PC → teléfono por AOA: 48000 Hz, float 32 bits, estéreo
+  latencia ≈56 ms · cola tel. 24.6/15.0 ms · reloj -86 ppm · cortes 0 · 8877 frames/s
+  latencia ≈54 ms · cola tel. 22.0/15.0 ms · reloj +101 ppm · cortes 0 · 48064 frames/s
+▶ Modo: apagado
+▶ Modo: PC → Móvil
+  Audio de la PC → teléfono por AOA: 48000 Hz, float 32 bits, estéreo
+  latencia ≈53 ms · cola tel. 26.3/15.0 ms · reloj +1000 ppm · cortes 0 · 0 frames/s
+  latencia ≈54 ms · cola tel. 27.9/15.0 ms · reloj +1000 ppm · cortes 0 · 48067 frames/s
+▶ Modo: apagado
+▶ Modo: PC → Móvil
+  Audio de la PC → teléfono por AOA: 48000 Hz, float 32 bits, estéreo
+  latencia ≈55 ms · cola tel. 23.6/15.0 ms · reloj -14 ppm · cortes 0 · 0 frames/s
+  latencia ≈53 ms · cola tel. 26.5/15.0 ms · reloj +312 ppm · cortes 0 · 47831 frames/s
+▶ Modo: apagado
+○ Se desconectó motorola moto g play (2021)
