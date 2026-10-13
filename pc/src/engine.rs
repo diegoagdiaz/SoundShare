@@ -184,6 +184,13 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Para probar el Hub sin abrir PipeWire ni cambiar la salida del escritorio.
+    #[cfg(test)]
+    pub(crate) fn without_audio() -> Engine {
+        let (tx, _) = pw::channel::channel::<Cmd>();
+        Engine { tx, thread: Mutex::new(None) }
+    }
+
     pub fn start() -> Result<(Engine, mpsc::Receiver<Failure>), String> {
         let (tx, rx) = pw::channel::channel::<Cmd>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();

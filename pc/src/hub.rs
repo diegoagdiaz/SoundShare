@@ -16,6 +16,10 @@ use crate::player_transport::{self, PlayerTransport, TransportChoice, TransportR
 use crate::control::RateLoop;
 use crate::engine::{self, Cmd, Engine, SINK_FORMAT, SinkShared, SourceShared};
 use crate::protocol::{self, Format, Mode, PlayerStatus, Role};
+use crate::wifi::{self, Wifi};
+
+/// Sin líneas del teléfono durante este tiempo, el CONTROL WiFi se da por perdido.
+const WIFI_CONTROL_TIMEOUT: Duration = Duration::from_secs(6);
 
 pub struct Hub {
     adb: Adb,
@@ -23,6 +27,8 @@ pub struct Hub {
     port: u16,
     /// Salida de PipeWire para Móvil → PC (None = la de por defecto).
     output: Option<String>,
+    /// Emparejamiento WiFi; None con los puertos de red desactivados.
+    wifi: Option<Arc<Wifi>>,
     st: Mutex<State>,
     aoa_open: Mutex<()>,
     next_id: AtomicU64,
@@ -48,28 +54,85 @@ struct PhoneStats {
 struct State {
     shutting_down: bool,
     mode: Mode,
+    /// Pedido por la CLI: se consume una sola vez al estar listo USB o CONTROL WiFi.
+    start_mode: Option<Mode>,
     device: Option<Device>,
-    controls: Vec<(u64, TcpStream)>,
+    controls: Vec<Control>,
     sink: Option<Arc<SinkShared>>,
     player: Option<(u64, PlayerTransport)>,
+    /// Se conserva al perder PLAYER: otro CONTROL no oculta la caída de su enlace.
+    player_link: Option<Link>,
     source: Option<Arc<SourceShared>>,
     capture: Option<TcpStream>,
     capture_child: Option<(u64, Child)>,
     capture_launch: Option<u64>,
+    /// Móvil → PC sin adb: captura la app y manda CAPTURE por WiFi.
+    capture_app: bool,
     show_stats: bool,
     aoa: Option<Arc<crate::aoa::Link>>,
     /// Edad del último PCM leído en Android, antes de enviarlo por USB.
     capture_latency_ms: Option<(f64, Instant)>,
 }
 
+/// Por dónde llegó una conexión del teléfono.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+    /// Loopback: `adb reverse` por cable o por depuración inalámbrica.
+    Adb,
+    /// WiFi nativo, ya autenticado.
+    Wifi,
+}
+
+struct Control {
+    id: u64,
+    writer: TcpStream,
+    link: Link,
+}
+
+impl State {
+    fn wifi_controls(&self) -> bool {
+        self.controls.iter().any(|c| c.link == Link::Wifi)
+    }
+
+    fn reply(&mut self, id: u64, line: &str) {
+        if let Some(c) = self.controls.iter_mut().find(|c| c.id == id) {
+            let _ = c.writer.write_all(format!("{line}\n").as_bytes());
+        }
+    }
+
+    fn reply_state(&mut self, id: u64) {
+        // Un CONTROL reemplazado también necesita el pedido, antes de STATE, para
+        // reabrir CAPTURE después de que el teléfono cerró su captura anterior.
+        if self.mode == Mode::PhoneToPc && self.capture_app
+            && self.controls.iter().any(|c| c.id == id && c.link == Link::Wifi) {
+            self.reply(id, "CAPTURE app");
+        }
+        self.reply(id, &format!("STATE {}", self.mode.wire()));
+    }
+
+    fn orphaned(&self) -> bool {
+        match self.mode {
+            Mode::PcToPhone => match self.player_link {
+                Some(Link::Wifi) => !self.wifi_controls(),
+                Some(Link::Adb) =>
+                    !self.controls.iter().any(|c| c.link == Link::Adb),
+                None => self.controls.is_empty(),
+            },
+            Mode::PhoneToPc => self.capture_app && !self.wifi_controls(),
+            Mode::Off => false,
+        }
+    }
+}
+
 impl Hub {
-    pub fn new(adb: Adb, engine: Engine, port: u16, output: Option<String>) -> Hub {
+    pub fn new(adb: Adb, engine: Engine, port: u16, output: Option<String>, wifi: Option<Arc<Wifi>>, start_mode: Option<Mode>) -> Hub {
         Hub {
             adb,
             engine,
             port,
             output,
-            st: Mutex::new(State { show_stats: true, ..State::default() }),
+            wifi,
+            st: Mutex::new(State { show_stats: true, start_mode, ..State::default() }),
             aoa_open: Mutex::new(()),
             next_id: AtomicU64::new(1),
             player_id: AtomicU64::new(0),
@@ -98,6 +161,18 @@ impl Hub {
     pub fn set_mode(self: &Arc<Self>, mode: Mode) {
         let mut st = self.st.lock().unwrap();
         self.set_mode_locked(&mut st, mode);
+    }
+
+    pub fn start_requested_mode(self: &Arc<Self>) {
+        let mut st = self.st.lock().unwrap();
+        self.start_requested_mode_locked(&mut st);
+    }
+
+    fn start_requested_mode_locked(self: &Arc<Self>, st: &mut State) -> bool {
+        if st.shutting_down { return false; }
+        let Some(mode) = st.start_mode.take() else { return false };
+        self.set_mode_locked(st, mode);
+        true
     }
 
     fn set_mode_locked(self: &Arc<Self>, st: &mut State, mode: Mode) {
@@ -138,6 +213,7 @@ impl Hub {
                     self.player_id.store(0, Ordering::Release);
                     s.close();
                 }
+                st.player_link = None;
             }
             Mode::PhoneToPc => {
                 if let Some((_, mut child)) = st.capture_child.take() {
@@ -153,16 +229,20 @@ impl Hub {
         }
         st.mode = Mode::Off;
         st.capture_launch = None;
+        st.capture_app = false;
         st.capture_latency_ms = None;
     }
 
     fn start_pc_to_phone(&self, st: &mut State) -> Result<(), String> {
-        let device = st.device.clone().ok_or("No hay ningún teléfono conectado")?;
+        // Por WiFi la app ya está conectada; sin ella ni adb no hay quién reproduzca.
+        if st.device.is_none() && !st.wifi_controls() {
+            return Err("No hay ningún teléfono conectado".into());
+        }
         let shared = SinkShared::new();
         st.sink = Some(shared.clone());
         self.engine.send(Cmd::StartSink(shared));
         // El reproductor vive en la app: si no está abierta, la abrimos.
-        if st.controls.is_empty() {
+        if let Some(device) = st.device.clone().filter(|_| st.controls.is_empty()) {
             println!("  Abriendo la app en el teléfono…");
             let adb = self.adb.clone();
             thread::spawn(move || { let _ = adb.start_app(&device.serial); });
@@ -171,7 +251,16 @@ impl Hub {
     }
 
     fn start_phone_to_pc(self: &Arc<Self>, st: &mut State) -> Result<(), String> {
-        let device = st.device.clone().ok_or("No hay ningún teléfono conectado")?;
+        let Some(device) = st.device.clone() else {
+            if !st.wifi_controls() {
+                return Err("No hay ningún teléfono conectado".into());
+            }
+            // Sin adb no hay capturador shell: lo pedimos a la app, antes del STATE.
+            st.capture_app = true;
+            let msg = "CAPTURE app\n";
+            st.controls.retain_mut(|c| c.link != Link::Wifi || c.writer.write_all(msg.as_bytes()).is_ok());
+            return Ok(());
+        };
         let id = self.id();
         st.capture_launch = Some(id);
         // Los comandos adb pueden tardar: no retenemos el estado mientras arrancan.
@@ -264,7 +353,10 @@ impl Hub {
             let mut st = self.st.lock().unwrap();
             if st.shutting_down { return TransportReason::Disconnected; }
             if st.aoa.as_ref().is_some_and(|a| a.alive()) { return TransportReason::Unavailable; }
-            let Some(serial) = st.device.as_ref().map(|d| d.serial.clone()) else { return TransportReason::Disconnected };
+            let Some(device) = st.device.as_ref() else { return TransportReason::Disconnected };
+            // adb inalámbrico no tiene interfaz USB, tampoco al pedir AOA explícitamente.
+            if !device.usb { return TransportReason::Unavailable; }
+            let serial = device.serial.clone();
             if st.aoa.is_none() && !explicit { return TransportReason::Unavailable; }
             // stop libera el handle aunque el lector o sesiones conserven Arc<Link>.
             if let Some(old) = st.aoa.take() { old.stop(); }
@@ -297,9 +389,7 @@ impl Hub {
         let mut st = self.st.lock().unwrap();
         let line = player_transport::advertisement(choice, st.aoa.as_ref().is_some_and(|a| a.alive()), reason);
         // Responder al solicitante; no cambiar modo/sink ni cerrar el accesorio al elegir adb.
-        if let Some((_, writer)) = st.controls.iter_mut().find(|(cid, _)| *cid == id) {
-            let _ = writer.write_all(format!("{line}\n").as_bytes());
-        }
+        st.reply(id, &line);
     }
 
     pub fn device_changed(self: &Arc<Self>, device: Option<Device>) {
@@ -307,12 +397,28 @@ impl Hub {
         if st.shutting_down { return; }
         let gone = st.device.is_some() && st.device.as_ref().map(|d| &d.serial) != device.as_ref().map(|d| &d.serial);
         st.device = device;
-        if gone {
+        // Una sesión por WiFi no depende del cable; el capturador shell y PLAYER por USB sí.
+        let wifi_session = st.wifi_controls() && match st.mode {
+            Mode::PcToPhone => st.player_link != Some(Link::Adb),
+            Mode::PhoneToPc => st.capture_app,
+            Mode::Off => false,
+        };
+        if gone && !wifi_session {
             self.set_mode_locked(&mut st, Mode::Off);
         }
     }
 
-    pub fn handle(self: &Arc<Self>, mut sock: TcpStream) {
+    pub fn handle(self: &Arc<Self>, sock: TcpStream) {
+        self.handle_link(sock, Link::Adb);
+    }
+
+    /// Conexión WiFi que ya completó autenticación y hello dentro del mismo plazo.
+    pub fn handle_wifi(self: &Arc<Self>, sock: TcpStream, role: Role) {
+        wifi::tune(&sock);
+        self.dispatch_link(sock, Link::Wifi, role);
+    }
+
+    fn handle_link(self: &Arc<Self>, mut sock: TcpStream, link: Link) {
         if self.st.lock().unwrap().shutting_down { return; }
         let _ = sock.set_nodelay(true);
         let _ = sock.set_read_timeout(Some(Duration::from_secs(5)));
@@ -324,33 +430,42 @@ impl Hub {
                 return;
             }
         };
-        if role != Role::Capture {
-            let _ = sock.set_read_timeout(None);
-        }
-        match role {
-            Role::Control => self.handle_control(sock),
-            Role::Player => self.handle_player(PlayerTransport::Adb(sock)),
-            Role::Capture => self.handle_capture(sock),
+        self.dispatch_link(sock, link, role);
+    }
+
+    fn dispatch_link(self: &Arc<Self>, sock: TcpStream, link: Link, role: Role) {
+        if self.st.lock().unwrap().shutting_down { return; }
+        let _ = sock.set_write_timeout(None);
+        let _ = sock.set_read_timeout(if role == Role::Capture { Some(Duration::from_secs(5)) } else { None });
+        match (role, link) {
+            (Role::Control, _) => self.handle_control(sock, link),
+            (Role::Player, Link::Adb) => self.handle_player(PlayerTransport::Adb(sock)),
+            (Role::Player, Link::Wifi) => self.handle_player(PlayerTransport::Wifi(sock)),
+            (Role::Capture, _) => self.handle_capture(sock, link),
         }
     }
 
-    fn handle_control(self: &Arc<Self>, sock: TcpStream) {
+    fn handle_control(self: &Arc<Self>, sock: TcpStream, link: Link) {
         let id = self.id();
         let Ok(writer) = sock.try_clone() else { return };
         let _ = writer.set_write_timeout(Some(Duration::from_secs(1)));
-        let reason = self.reopen_aoa(false);
+        // Por WiFi el teléfono manda PING cada segundo: el silencio largo es una red caída.
+        if link == Link::Wifi { let _ = sock.set_read_timeout(Some(WIFI_CONTROL_TIMEOUT)); }
+        // AOA es del cable: un CONTROL WiFi no lo reabre ni recibe anuncios de transporte.
+        let reason = (link == Link::Adb).then(|| self.reopen_aoa(false));
         {
             let mut st = self.st.lock().unwrap();
             if st.shutting_down { return; }
-            st.controls.push((id, writer));
-            let line = player_transport::advertisement(TransportChoice::Aoa,
-                st.aoa.as_ref().is_some_and(|a| a.alive()), reason);
-            // El anuncio inicial va sólo a esta app, para no pisar el selector de otro CONTROL.
-            if let Some((_, writer)) = st.controls.iter_mut().find(|(cid, _)| *cid == id) {
-                let _ = writer.write_all(format!("{line}\n").as_bytes());
+            st.controls.push(Control { id, writer, link });
+            if let Some(reason) = reason {
+                let line = player_transport::advertisement(TransportChoice::Aoa,
+                    st.aoa.as_ref().is_some_and(|a| a.alive()), reason);
+                // El anuncio inicial va sólo a esta app, para no pisar el selector de otro CONTROL.
+                st.reply(id, &line);
             }
-            let line = format!("STATE {}", st.mode.wire());
-            self.broadcast(&mut st, &line);
+            if link != Link::Wifi || !self.start_requested_mode_locked(&mut st) {
+                st.reply_state(id);
+            }
         }
         let mut name = String::from("la app");
         let mut reader = BufReader::new(sock);
@@ -360,21 +475,31 @@ impl Hub {
                 "HELLO" => {
                     let (model, sdk) = arg.split_once('|').unwrap_or((arg, "?"));
                     name = model.to_string();
-                    println!("● App conectada: {model} (Android API {sdk})");
+                    let via = if link == Link::Wifi { " por WiFi" } else { "" };
+                    println!("● App conectada{via}: {model} (Android API {sdk})");
                 }
                 "MODE" => match Mode::parse(arg) {
                     Some(m) => self.set_mode(m),
                     None => eprintln!("✗ Modo desconocido desde el teléfono: {arg}"),
                 },
-                "TRANSPORT" => {
+                "TRANSPORT" if link == Link::Adb => {
                     if let Some(choice) = TransportChoice::parse(arg) { self.request_transport(id, choice); }
+                }
+                // Sólo por loopback: adb ya autenticó a este teléfono.
+                "LAN_PAIR" if link == Link::Adb => self.pair(id, arg, &name),
+                "CAPTURE_FAILED" if link == Link::Wifi => self.capture_failed(arg),
+                "CAPTURE_LATENCY" if link == Link::Wifi => {
+                    if let Ok(ms) = arg.parse::<f64>() {
+                        let mut st = self.st.lock().unwrap();
+                        if st.mode == Mode::PhoneToPc && st.capture_app {
+                            st.capture_latency_ms = (ms.is_finite() && (0.0..=5000.0).contains(&ms))
+                                .then_some((ms, Instant::now()));
+                        }
+                    }
                 }
                 "PING" => {
                     if let Ok(token) = arg.parse::<u64>() {
-                        let mut st = self.st.lock().unwrap();
-                        if let Some((_, writer)) = st.controls.iter_mut().find(|(cid, _)| *cid == id) {
-                            let _ = writer.write_all(format!("PONG {token}\n").as_bytes());
-                        }
+                        self.st.lock().unwrap().reply(id, &format!("PONG {token}"));
                     }
                 }
                 _ => {}
@@ -382,11 +507,34 @@ impl Hub {
         }
         println!("○ Se desconectó {name}");
         let mut st = self.st.lock().unwrap();
-        st.controls.retain(|(cid, _)| *cid != id);
-        // Sin la app no hay quien reproduzca: devolvemos el audio a la PC.
-        if st.controls.is_empty() && st.mode == Mode::PcToPhone {
+        if let Some(c) = st.controls.iter().position(|c| c.id == id) {
+            let _ = st.controls.remove(c).writer.shutdown(Shutdown::Both);
+        }
+        // Sin la app no hay quien reproduzca ni capture: devolvemos el audio a la PC.
+        if st.orphaned() {
             self.set_mode_locked(&mut st, Mode::Off);
         }
+    }
+
+    fn pair(&self, id: u64, phone_id: &str, name: &str) {
+        let Some(wifi) = &self.wifi else { return };
+        match wifi.pair(phone_id, name) {
+            Ok(line) => {
+                self.st.lock().unwrap().reply(id, &line);
+                println!("  WiFi: {name} emparejado con esta PC.");
+            }
+            Err(e) => eprintln!("⚠ No pude emparejar {name} para WiFi: {e}"),
+        }
+    }
+
+    fn capture_failed(self: &Arc<Self>, reason: &str) {
+        let mut st = self.st.lock().unwrap();
+        if st.mode != Mode::PhoneToPc || !st.capture_app { return; }
+        let msg = if reason.is_empty() { "el teléfono no pudo capturar el audio" } else { reason };
+        eprintln!("✗ {msg}");
+        self.teardown(&mut st);
+        self.broadcast(&mut st, &format!("ERROR {msg}"));
+        self.broadcast(&mut st, "STATE off");
     }
 
     /// PC → Móvil: vacía el ring del sink hacia el teléfono y escucha su estado.
@@ -399,6 +547,7 @@ impl Hub {
             if let Some((_, old)) = st.player.take() {
                 old.close();
             }
+            st.player_link = Some(if matches!(sock, PlayerTransport::Wifi(_)) { Link::Wifi } else { Link::Adb });
             st.player = Some((id, clone));
             self.player_id.store(id, Ordering::Release);
             shared
@@ -410,12 +559,14 @@ impl Hub {
             return;
         }
         shared.ring.clear();
-        if sock.format(&SINK_FORMAT.encode()).is_err() {
+        let wire_format = sock.pcm_format(SINK_FORMAT);
+        if sock.format(&wire_format.encode()).is_err() {
             sock.close();
             self.finish_player(id);
             return;
         }
-        println!("  Audio de la PC → teléfono por {}: {} Hz, float 32 bits, estéreo", sock.label(), SINK_FORMAT.rate);
+        let sample = if wire_format.sample == protocol::Sample::F32LE { "float 32" } else { "PCM 16" };
+        println!("  Audio de la PC → teléfono por {}: {} Hz, {sample} bits, estéreo", sock.label(), wire_format.rate);
 
         let status = sock.try_clone().ok().map(|rs| {
             let hub = self.clone();
@@ -423,8 +574,9 @@ impl Hub {
             thread::spawn(move || hub.player_status_loop(id, rs, shared))
         });
 
-        let buffer_size = match &sock { PlayerTransport::Adb(_) => 32 * 1024, PlayerTransport::Aoa(_) => crate::aoa_frame::MAX_PCM };
+        let buffer_size = match &sock { PlayerTransport::Adb(_) | PlayerTransport::Wifi(_) => 32 * 1024, PlayerTransport::Aoa(_) => crate::aoa_frame::MAX_PCM };
         let mut buf = vec![0u8; buffer_size];
+        let mut converted = Vec::with_capacity(if wire_format.sample == protocol::Sample::S16LE { buffer_size / 2 } else { 0 });
         let mut last_send = engine::now_ns();
         'send: loop {
             shared.wake.wait(100);
@@ -436,7 +588,7 @@ impl Hub {
                 if n == 0 {
                     break;
                 }
-                if sock.write_all(&buf[..n]).is_err() {
+                if sock.write_pcm(&buf[..n], &mut converted).is_err() {
                     break 'send;
                 }
                 let now = engine::now_ns();
@@ -505,7 +657,7 @@ impl Hub {
     }
 
     /// Móvil → PC: lo que manda el capturador va al ring que lee PipeWire.
-    fn handle_capture(self: &Arc<Self>, mut sock: TcpStream) {
+    fn handle_capture(self: &Arc<Self>, mut sock: TcpStream, link: Link) {
         let fmt = match Format::read(&mut sock) {
             Ok(f) => f,
             Err(e) => {
@@ -517,7 +669,8 @@ impl Hub {
         let shared = SourceShared::new(fmt, self.output.clone());
         {
             let mut st = self.st.lock().unwrap();
-            if st.shutting_down || st.mode != Mode::PhoneToPc {
+            // Por WiFi sólo si se lo pedimos a la app: no reemplaza al capturador shell.
+            if st.shutting_down || st.mode != Mode::PhoneToPc || (link == Link::Wifi && !st.capture_app) {
                 return;
             }
             if let Some(old) = st.capture.take() {
@@ -529,7 +682,8 @@ impl Hub {
             self.engine.send(Cmd::StartSource(shared.clone()));
         }
         println!(
-            "  Audio del teléfono → PC: {} Hz, {} bits, {} canales",
+            "  Audio del teléfono → PC{}: {} Hz, {} bits, {} canales",
+            if link == Link::Wifi { " por WiFi" } else { "" },
             fmt.rate,
             fmt.sample.bytes() * 8,
             fmt.channels
@@ -569,7 +723,7 @@ impl Hub {
 
     fn broadcast(&self, st: &mut State, line: &str) {
         let msg = format!("{line}\n");
-        st.controls.retain_mut(|(_, s)| s.write_all(msg.as_bytes()).is_ok());
+        st.controls.retain_mut(|c| c.writer.write_all(msg.as_bytes()).is_ok());
     }
 
     /// Un error tardío solo puede apagar el stream que lo originó, nunca una sesión nueva.
@@ -685,10 +839,147 @@ impl Hub {
             st.shutting_down = true;
             self.teardown(&mut st);
             self.broadcast(&mut st, "STATE off");
-            for (_, sock) in st.controls.drain(..) {
-                let _ = sock.shutdown(Shutdown::Both);
+            for c in st.controls.drain(..) {
+                let _ = c.writer.shutdown(Shutdown::Both);
             }
         }
         self.engine.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        (listener.accept().unwrap().0, client)
+    }
+
+    fn control(id: u64, link: Link) -> (Control, TcpStream) {
+        let (writer, reader) = tcp_pair();
+        (Control { id, writer, link }, reader)
+    }
+
+    fn hub(start_mode: Option<Mode>) -> Arc<Hub> {
+        Arc::new(Hub::new(Adb::without_device(), Engine::without_audio(), protocol::PORT, None, None, start_mode))
+    }
+
+    fn wifi_control(hub: &Arc<Hub>) -> (BufReader<TcpStream>, thread::JoinHandle<()>) {
+        let (server, client) = tcp_pair();
+        let hub = hub.clone();
+        let thread = thread::spawn(move || hub.handle_wifi(server, Role::Control));
+        (BufReader::new(client), thread)
+    }
+
+    fn line(reader: &mut BufReader<TcpStream>) -> String {
+        protocol::read_line(reader).unwrap().unwrap()
+    }
+
+    fn close_control(reader: BufReader<TcpStream>, thread: thread::JoinHandle<()>) {
+        reader.get_ref().shutdown(Shutdown::Both).unwrap();
+        drop(reader);
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn replacement_wifi_control_gets_capture_before_state() {
+        let hub = hub(None);
+        let (old, _old_reader) = control(100, Link::Wifi);
+        {
+            let mut st = hub.st.lock().unwrap();
+            st.mode = Mode::PhoneToPc;
+            st.capture_app = true;
+            st.controls.push(old);
+        }
+        let (mut reader, thread) = wifi_control(&hub);
+        assert_eq!(line(&mut reader), "CAPTURE app");
+        assert_eq!(line(&mut reader), "STATE phone2pc");
+        close_control(reader, thread);
+        assert_eq!(hub.mode(), Mode::PhoneToPc);
+        hub.shutdown();
+    }
+
+    #[test]
+    fn capture_request_is_not_sent_to_usb_or_for_shell_capture() {
+        for (link, capture_app) in [(Link::Adb, true), (Link::Wifi, false)] {
+            let (control, reader) = control(1, link);
+            let mut st = State { mode: Mode::PhoneToPc, capture_app, controls: vec![control], ..State::default() };
+            st.reply_state(1);
+            assert_eq!(line(&mut BufReader::new(reader)), "STATE phone2pc");
+        }
+    }
+
+    #[test]
+    fn cli_start_modes_work_without_adb_and_are_consumed_once() {
+        for mode in [Mode::PcToPhone, Mode::PhoneToPc] {
+            let hub = hub(Some(mode));
+            let (mut reader, thread) = wifi_control(&hub);
+            if mode == Mode::PhoneToPc { assert_eq!(line(&mut reader), "CAPTURE app"); }
+            assert_eq!(line(&mut reader), format!("STATE {}", mode.wire()));
+            assert_eq!(hub.mode(), mode);
+            assert!(hub.st.lock().unwrap().start_mode.is_none());
+            hub.set_mode(Mode::Off);
+            assert_eq!(line(&mut reader), "STATE off");
+            // El watcher USB puede terminar de preparar el mismo teléfono después de WiFi.
+            hub.start_requested_mode();
+            assert_eq!(hub.mode(), Mode::Off);
+            close_control(reader, thread);
+            let (mut reader, thread) = wifi_control(&hub);
+            assert_eq!(line(&mut reader), "STATE off");
+            close_control(reader, thread);
+            hub.shutdown();
+        }
+    }
+
+    #[test]
+    fn usb_readiness_can_still_consume_the_cli_start_mode() {
+        let hub = hub(Some(Mode::PcToPhone));
+        let (usb, _reader) = control(100, Link::Adb);
+        {
+            let mut st = hub.st.lock().unwrap();
+            st.device = Some(Device { serial: "test-phone".into(), state: "device".into(), model: "Android".into(), usb: true });
+            st.controls.push(usb);
+        }
+        hub.start_requested_mode();
+        assert_eq!(hub.mode(), Mode::PcToPhone);
+        assert!(hub.st.lock().unwrap().start_mode.is_none());
+        hub.shutdown();
+    }
+
+    #[test]
+    fn unrelated_usb_control_does_not_keep_a_lost_wifi_player_active() {
+        let (usb, _usb_reader) = control(1, Link::Adb);
+        let (wifi_player, _player_reader) = tcp_pair();
+        let mut st = State {
+            mode: Mode::PcToPhone,
+            controls: vec![usb],
+            player: Some((3, PlayerTransport::Wifi(wifi_player))),
+            player_link: Some(Link::Wifi),
+            ..State::default()
+        };
+        assert!(st.orphaned());
+        st.player = None;
+        assert!(st.orphaned(), "PLAYER puede notar la caída antes que CONTROL");
+        let (wifi, _wifi_reader) = control(2, Link::Wifi);
+        st.controls.push(wifi);
+        assert!(!st.orphaned());
+    }
+
+    #[test]
+    fn explicit_aoa_request_for_wireless_adb_stays_on_adb() {
+        let hub = hub(None);
+        let (usb, reader) = control(1, Link::Adb);
+        {
+            let mut st = hub.st.lock().unwrap();
+            st.device = Some(Device { serial: "192.168.0.20:37099".into(), state: "device".into(), model: "Android".into(), usb: false });
+            st.controls.push(usb);
+        }
+        hub.request_transport(1, TransportChoice::Aoa);
+        assert_eq!(line(&mut BufReader::new(reader)), "PLAYER_TRANSPORT adb unavailable");
+        hub.shutdown();
     }
 }

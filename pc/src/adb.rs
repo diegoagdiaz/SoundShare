@@ -14,12 +14,33 @@ fn parse_version_code(output: &str) -> Option<u32> {
     output.split_whitespace().find_map(|part| part.strip_prefix("versionCode=")?.parse().ok())
 }
 
+fn parse_devices(out: &str) -> Vec<Device> {
+    out.lines()
+        .skip_while(|l| !l.starts_with("List of devices"))
+        .skip(1)
+        .filter_map(|l| {
+            let mut parts = l.split_whitespace();
+            let serial = parts.next()?.to_string();
+            let state = parts.next()?.to_string();
+            let fields: Vec<&str> = parts.collect();
+            let model = fields.iter()
+                .find_map(|p| p.strip_prefix("model:"))
+                .unwrap_or("Android")
+                .replace('_', " ");
+            let usb = fields.iter().any(|p| p.starts_with("usb:"));
+            Some(Device { serial, state, model, usb })
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Device {
     pub serial: String,
     /// "device", "unauthorized", "offline"...
     pub state: String,
     pub model: String,
+    /// Por cable; si no, por depuración inalámbrica (`IP:puerto` o `adb-…._adb-tls-connect._tcp`).
+    pub usb: bool,
 }
 
 #[derive(Clone)]
@@ -28,6 +49,11 @@ pub struct Adb {
 }
 
 impl Adb {
+    #[cfg(test)]
+    pub(crate) fn without_device() -> Adb {
+        Adb { bin: "/nonexistent-soundshare-test-adb".into() }
+    }
+
     /// Busca adb en $ADB, en el PATH o en el SDK de Android.
     pub fn find() -> Option<Adb> {
         let mut candidates: Vec<PathBuf> = Vec::new();
@@ -103,28 +129,27 @@ impl Adb {
     }
 
     pub fn devices(&self) -> io::Result<Vec<Device>> {
-        let out = self.run(None, &["devices", "-l"])?;
-        Ok(out
-            .lines()
-            .skip_while(|l| !l.starts_with("List of devices"))
-            .skip(1)
-            .filter_map(|l| {
-                let mut parts = l.split_whitespace();
-                let serial = parts.next()?.to_string();
-                let state = parts.next()?.to_string();
-                let model = parts
-                    .find_map(|p| p.strip_prefix("model:"))
-                    .unwrap_or("Android")
-                    .replace('_', " ");
-                Some(Device { serial, state, model })
-            })
-            .collect())
+        Ok(parse_devices(&self.run(None, &["devices", "-l"])?))
+    }
+
+    /// Ejecuta adb con estos argumentos y su misma terminal (para `adb pair`/`adb connect`).
+    pub fn passthrough(&self, args: &[String]) -> io::Result<std::process::ExitStatus> {
+        Command::new(&self.bin).args(args).status()
     }
 
     /// Hace que 127.0.0.1:port del teléfono llegue a 127.0.0.1:port de la PC.
     pub fn reverse(&self, serial: &str, port: u16) -> io::Result<()> {
         let spec = format!("tcp:{port}");
-        self.run(Some(serial), &["reverse", &spec, &spec]).map(|_| ())
+        match self.run(Some(serial), &["reverse", &spec, &spec]) {
+            Ok(_) => Ok(()),
+            Err(e) if e.to_string().contains("Address already in use") => {
+                // Un listener viejo puede sobrevivir al cambio de transporte USB/AOA.
+                // Retirar sólo nuestro puerto y reintentar una vez, nunca todos los túneles.
+                let _ = self.run(Some(serial), &["reverse", "--remove", &spec]);
+                self.run(Some(serial), &["reverse", &spec, &spec]).map(|_| ())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn shell(&self, serial: &str, command: &str) -> io::Result<String> {
@@ -167,6 +192,40 @@ impl Adb {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn reverse_recovers_only_occupied_port() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("soundshare-reverse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("adb");
+        std::fs::write(&bin, r#"#!/bin/sh
+cd "$(dirname "$0")" || exit 1
+printf '%s\n' "$*" >> calls
+if [ "$4" = '--remove' ]; then touch removed; exit 0; fi
+if [ ! -f removed ]; then
+    echo 'adb: error: cannot bind listener: Address already in use' >&2
+    exit 1
+fi
+"#).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let adb = Adb { bin };
+        adb.reverse("test-phone", 47100).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("calls")).unwrap(),
+            "-s test-phone reverse tcp:47100 tcp:47100\n-s test-phone reverse --remove tcp:47100\n-s test-phone reverse tcp:47100 tcp:47100\n");
+        std::fs::write(dir.join("calls"), "").unwrap();
+        std::fs::write(&adb.bin, r#"#!/bin/sh
+cd "$(dirname "$0")" || exit 1
+printf '%s\n' "$*" >> calls
+echo 'adb: device unauthorized' >&2
+exit 1
+"#).unwrap();
+        assert!(adb.reverse("test-phone", 47100).unwrap_err().to_string().contains("unauthorized"));
+        assert_eq!(std::fs::read_to_string(dir.join("calls")).unwrap(),
+            "-s test-phone reverse tcp:47100 tcp:47100\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn installed_version_with_sdk_fields() {
         let out = "Packages:\n  Package [com.soundshare] (abc):\n    versionCode=4 minSdk=26 targetSdk=34\n    versionName=0.3.0\n";
@@ -184,6 +243,19 @@ mod tests {
     fn first_version_wins_with_multiple_entries() {
         let out = "  versionCode=4 minSdk=26 targetSdk=34\nHidden system packages:\n  versionCode=2 minSdk=26 targetSdk=34";
         assert_eq!(parse_version_code(out), Some(4));
+    }
+
+    #[test]
+    fn tells_usb_from_wireless_devices() {
+        let out = "* daemon started successfully\nList of devices attached\n\
+            ZY22DVN9D2             device usb:3-2 product:guamna_a model:moto_g_play__2021_ device:guamna transport_id:38\n\
+            192.168.0.20:37099     device product:a21sxx model:SM_A217M device:a21s transport_id:4\n\
+            adb-RF8N72VT02E-Ab12Cd._adb-tls-connect._tcp unauthorized transport_id:5\n\n";
+        let devices = parse_devices(out);
+        assert_eq!(devices.len(), 3);
+        assert_eq!((devices[0].model.as_str(), devices[0].usb), ("moto g play  2021 ", true));
+        assert_eq!((devices[1].serial.as_str(), devices[1].model.as_str(), devices[1].usb), ("192.168.0.20:37099", "SM A217M", false));
+        assert_eq!((devices[2].state.as_str(), devices[2].usb), ("unauthorized", false));
     }
 
     /// Simula un comando colgado sin depender de un dispositivo ni del servidor adb.
