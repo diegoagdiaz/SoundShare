@@ -58,7 +58,10 @@ class QueueTarget(private val burst: Int, sampleRate: Int, private val maxFrames
     }
 
     private fun update(now: Long): Boolean {
-        val worstGap = buckets.max()
+        // Sin IntArray.max(): su primera llamada carga ArraysKt de kotlin-stdlib (miles de métodos)
+        // y frenaba ~50 ms el hilo de audio en el moto g play, con cortes al arrancar.
+        var worstGap = 0
+        for (gap in buckets) worstGap = maxOf(worstGap, gap)
         // Peor hueco + un burst de margen, redondeado a bursts enteros.
         val wanted = maxOf(floor, minFrames, ((worstGap + burst + burst - 1) / burst) * burst)
             .coerceAtMost(maxFrames)
