@@ -37,6 +37,8 @@ class LinkService : Service() {
     private var controlThread: Thread? = null
     private val writer = Executors.newSingleThreadExecutor()
     private var player: Player? = null
+    private lateinit var accessory: AccessoryTransport
+    @Volatile private var preferAoa = false
     @Volatile private var quitting = false
     @Volatile private var offAck: CountDownLatch? = null
     @Volatile private var pendingPing = 0L
@@ -55,6 +57,16 @@ class LinkService : Service() {
         super.onCreate()
         instance = this
         createChannel()
+        accessory = AccessoryTransport(this) { refreshAccessory() }
+    }
+
+    private fun refreshAccessory() {
+        main.post {
+            if (running && preferAoa) {
+                accessory.prepare()
+                if (mode == Mode.PC_TO_PHONE) { stopPlayer(); applyMode(mode) }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -79,6 +91,7 @@ class LinkService : Service() {
         controlOut = null
         runCatching { controlSocket?.close() }
         stopPlayer()
+        accessory.close()
         writer.shutdownNow()
         instance = null
         connected = false
@@ -161,6 +174,7 @@ class LinkService : Service() {
         val cmd = if (space < 0) line else line.substring(0, space)
         val arg = if (space < 0) "" else line.substring(space + 1)
         when (cmd) {
+            "PLAYER_TRANSPORT" -> { preferAoa = arg == "aoa"; if (preferAoa) main.post { accessory.prepare() } }
             "STATE" -> Mode.parse(arg)?.let {
                 applyMode(it)
                 if (it == Mode.OFF) offAck?.countDown()
@@ -195,7 +209,7 @@ class LinkService : Service() {
             playerStats = null
         }
         if (m == Mode.PC_TO_PHONE && player == null) {
-            player = Player(this) { stats ->
+            player = Player(this, if (preferAoa) accessory else null) { stats ->
                 playerStats = stats
                 notifyChanged()
             }.also { it.start() }
@@ -327,7 +341,7 @@ class LinkService : Service() {
         fun latencyEstimate(): LatencyEstimate.Value {
             val now = System.nanoTime()
             val pc = pcLatency?.takeIf { now - it.received < 3_000_000_000L }?.value
-            val rtt = transport?.takeIf { now - it.received < 3_000_000_000L }?.milliseconds
+            val rtt = transport?.takeIf { now - it.received < 3_000_000_000L && playerStats?.transportName != "aoa" }?.milliseconds
             val player = playerStats?.takeIf { now - it.measuredAtNs < 1_500_000_000L }
             return LatencyEstimate.calculate(mode, pc, player?.queuedMs?.toDouble(),
                 player?.takeIf { it.outputLatencyFrames >= 0 }?.outputLatencyMs?.toDouble(),
@@ -342,6 +356,9 @@ class LinkService : Service() {
             quitRequested = false
             context.startForegroundService(Intent(context, LinkService::class.java))
         }
+
+        /** El intent de accesorio puede conceder permiso con una actividad ya abierta. */
+        fun accessoryAttached() { instance?.refreshAccessory() }
 
         /** Pide un modo a la PC; el cambio real llega como STATE. */
         fun requestMode(m: Mode) {

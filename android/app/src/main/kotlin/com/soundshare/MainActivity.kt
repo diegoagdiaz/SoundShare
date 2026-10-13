@@ -2,6 +2,8 @@ package com.soundshare
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
+import android.hardware.usb.UsbManager
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.os.Build
@@ -50,6 +52,12 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
         LinkService.start(this)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == UsbManager.ACTION_USB_ACCESSORY_ATTACHED) LinkService.accessoryAttached()
     }
 
     override fun onStart() {

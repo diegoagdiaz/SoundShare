@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::adb::{Adb, Device};
+use crate::player_transport::PlayerTransport;
 use crate::control::RateLoop;
 use crate::engine::{self, Cmd, Engine, SINK_FORMAT, SinkShared, SourceShared};
 use crate::protocol::{self, Format, Mode, PlayerStatus, Role};
@@ -46,12 +47,13 @@ struct State {
     device: Option<Device>,
     controls: Vec<(u64, TcpStream)>,
     sink: Option<Arc<SinkShared>>,
-    player: Option<(u64, TcpStream)>,
+    player: Option<(u64, PlayerTransport)>,
     source: Option<Arc<SourceShared>>,
     capture: Option<TcpStream>,
     capture_child: Option<(u64, Child)>,
     capture_launch: Option<u64>,
     show_stats: bool,
+    aoa: Option<Arc<crate::aoa::Link>>,
     /// Edad del último PCM leído en Android, antes de enviarlo por USB.
     capture_latency_ms: Option<(f64, Instant)>,
 }
@@ -127,7 +129,7 @@ impl Hub {
                 self.engine.send(Cmd::StopSink);
                 st.sink = None;
                 if let Some((_, s)) = st.player.take() {
-                    let _ = s.shutdown(Shutdown::Both);
+                    s.close();
                 }
             }
             Mode::PhoneToPc => {
@@ -241,6 +243,12 @@ impl Hub {
 
     // ------------------------------------------------------------ teléfono
 
+    pub fn set_aoa(&self, link: Option<Arc<crate::aoa::Link>>) {
+        let mut st = self.st.lock().unwrap();
+        if let Some(old) = st.aoa.take() { old.stop(); }
+        st.aoa = link;
+    }
+
     pub fn device_changed(self: &Arc<Self>, device: Option<Device>) {
         let mut st = self.st.lock().unwrap();
         if st.shutting_down { return; }
@@ -268,7 +276,7 @@ impl Hub {
         }
         match role {
             Role::Control => self.handle_control(sock),
-            Role::Player => self.handle_player(sock),
+            Role::Player => self.handle_player(PlayerTransport::Adb(sock)),
             Role::Capture => self.handle_capture(sock),
         }
     }
@@ -281,6 +289,8 @@ impl Hub {
             let mut st = self.st.lock().unwrap();
             if st.shutting_down { return; }
             st.controls.push((id, writer));
+            let transport = if st.aoa.as_ref().is_some_and(|a| a.alive()) { "aoa" } else { "adb" };
+            self.broadcast(&mut st, &format!("PLAYER_TRANSPORT {transport}"));
             let line = format!("STATE {}", st.mode.wire());
             self.broadcast(&mut st, &line);
         }
@@ -319,13 +329,13 @@ impl Hub {
     }
 
     /// PC → Móvil: vacía el ring del sink hacia el teléfono y escucha su estado.
-    fn handle_player(self: &Arc<Self>, mut sock: TcpStream) {
+    pub fn handle_player(self: &Arc<Self>, mut sock: PlayerTransport) {
         let id = self.id();
         let shared = {
             let mut st = self.st.lock().unwrap();
-            let Some(shared) = st.sink.clone().filter(|_| !st.shutting_down && st.mode == Mode::PcToPhone) else { return };
+            let Some(shared) = st.sink.clone().filter(|_| !st.shutting_down && st.mode == Mode::PcToPhone) else { sock.close(); return };
             if let Some((_, old)) = st.player.take() {
-                let _ = old.shutdown(Shutdown::Both);
+                old.close();
             }
             let Ok(clone) = sock.try_clone() else { return };
             st.player = Some((id, clone));
@@ -333,10 +343,11 @@ impl Hub {
         };
         let _consumer = shared.consumer.lock().unwrap();
         shared.ring.clear();
-        if sock.write_all(&SINK_FORMAT.encode()).is_err() {
+        if sock.format(&SINK_FORMAT.encode()).is_err() {
+            sock.close();
             return;
         }
-        println!("  Audio de la PC → teléfono: {} Hz, float 32 bits, estéreo", SINK_FORMAT.rate);
+        println!("  Audio de la PC → teléfono por {}: {} Hz, float 32 bits, estéreo", sock.label(), SINK_FORMAT.rate);
 
         let status = sock.try_clone().ok().map(|rs| {
             let hub = self.clone();
@@ -344,7 +355,8 @@ impl Hub {
             thread::spawn(move || hub.player_status_loop(rs, shared))
         });
 
-        let mut buf = vec![0u8; 32 * 1024];
+        let buffer_size = match &sock { PlayerTransport::Adb(_) => 32 * 1024, PlayerTransport::Aoa(_) => crate::aoa_frame::MAX_PCM };
+        let mut buf = vec![0u8; buffer_size];
         let mut last_send = engine::now_ns();
         'send: loop {
             shared.wake.wait(100);
@@ -365,7 +377,7 @@ impl Hub {
                 break;
             }
         }
-        let _ = sock.shutdown(Shutdown::Both);
+        sock.close();
         if let Some(t) = status {
             let _ = t.join();
         }
@@ -376,7 +388,7 @@ impl Hub {
     }
 
     /// El teléfono informa su cola cada ~10 ms; el lazo la lleva al objetivo ajustando nuestro reloj.
-    fn player_status_loop(&self, mut sock: TcpStream, shared: Arc<SinkShared>) {
+    fn player_status_loop(&self, mut sock: PlayerTransport, shared: Arc<SinkShared>) {
         let mut control = RateLoop::new(engine::LOOP_BANDWIDTH_HZ, engine::LOOP_MAX_PPM, engine::LOOP_SMOOTHING_S);
         let rate = SINK_FORMAT.rate as f64;
         let frame = SINK_FORMAT.frame_bytes();
@@ -401,6 +413,7 @@ impl Hub {
             self.phone.underruns.store(s.underruns, Ordering::Relaxed);
             self.phone.output_latency.store(s.output_latency, Ordering::Relaxed);
         }
+        sock.close();
         shared.rate_dev.store(0.0);
     }
 

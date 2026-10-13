@@ -6,7 +6,7 @@ Solo hay un sentido activo a la vez:
 
 ```text
 PC → Móvil
-Apps PC → sink «SoundShare → Móvil» → PipeWire → USB/adb → AudioTrack → salida del teléfono
+Apps PC → sink «SoundShare → Móvil» → PipeWire → USB/AOA → AudioTrack → salida del teléfono
                                               F32LE, 48 kHz, estéreo
 
 Móvil → PC
@@ -67,11 +67,23 @@ Para arrancar directamente en un sentido:
 ./soundshare phone2pc
 ```
 
-La depuración USB sigue siendo necesaria en ambos sentidos con el transporte actual. Instalar el APK no puede activar ni autorizar ese permiso por vos.
+La depuración USB sigue siendo necesaria: CONTROL y CAPTURE usan adb, incluso cuando PLAYER va por AOA. Instalar el APK no puede activar ni autorizar ese permiso por vos.
 
 ## Conexión
 
-La PC escucha en `127.0.0.1:47100`. Todas las conexiones las abre el teléfono hacia su propio `127.0.0.1:47100`; el túnel `adb reverse tcp:47100 tcp:47100` las lleva por USB a la PC. SoundShare configura ese túnel automáticamente.
+PC → Móvil prefiere **Android Open Accessory (AOA)** para PCM y el estado de cola de 10 ms. La PC busca la serie USB que coincide con la serie de adb, negocia AOA y espera **18d1:2d01 (accessory + adb)** antes de abrir el resto. El teléfono se reenumera una sola vez por conexión del cable; luego SoundShare rehace `adb reverse` y abre la app. No reclama la interfaz de adb. Una caída temporal de adb con el cable presente rehace el túnel cuando vuelve y permite reconectar CONTROL.
+
+En Android, aceptá el diálogo **Abrir SoundShare cuando se conecte este accesorio** o el permiso USB de SoundShare. Si falta permiso en Linux, se rechaza el diálogo, no hay soporte AOA o falla la apertura/transferencia, PLAYER vuelve al socket adb automáticamente. Un fallo del descriptor inhibe AOA hasta reconectar el accesorio; detener y volver a iniciar audio conserva el descriptor y abre otra sesión lógica. El diálogo puede quedar pendiente mientras funciona el fallback.
+
+CONTROL y CAPTURE siguen en `127.0.0.1:47100` por `adb reverse tcp:47100 tcp:47100`. CAPTURE se lanza con `adb shell` y conserva la identidad shell necesaria en Android 11. Para comparar o forzar el transporte anterior: `SOUNDSHARE_PLAYER_TRANSPORT=adb ./soundshare pc2phone`. Sin esa variable se intenta AOA; `aoa` también intenta AOA con fallback.
+
+AOA usa libusb compilada dentro del ejecutable (`rusb` con `vendored`): no necesita libusb-devel y no agrega una biblioteca dinámica al AppImage. La regla Android existente debe cubrir **18d1:2d01**. Si no lo cubre, el administrador puede agregar una regla udev (por ejemplo `/etc/udev/rules.d/70-soundshare.rules`) y reconectar el cable:
+
+```udev
+SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", ATTR{idProduct}=="2d01", MODE="0660", TAG+="uaccess"
+```
+
+SoundShare se ejecuta en la sesión de usuario, sin root. También necesita acceso al USB original para negociar AOA. No cambia reglas ni permisos del sistema; si no puede abrir el accesorio, informa el motivo y usa adb. AOA reemplaza MTP mientras está conectado; para volver a transferencia de archivos, desconectá y reconectá el cable.
 
 ## Requisitos para desarrollar y compilar
 
@@ -184,7 +196,7 @@ La PC acepta `-p PUERTO`, pero la app usa el puerto fijo 47100: dejá el predete
 
 PC → Móvil transporta float de 32 bits a 48 kHz estéreo. Móvil → PC transporta PCM de 16 bits a 48 kHz estéreo, el formato de la mezcla capturada. No hay codec con pérdidas. La corrección de reloj usa el resampler adaptativo de PipeWire con `resample.quality=10`; por eso la salida completa no se promete idéntica bit a bit tras el ajuste de reloj.
 
-El sink pide un cuántum de 256 frames (5,3 ms) y sigue procesando aunque no haya audio. Android solicita AudioTrack de baja latencia; obtener una pista rápida depende del teléfono. En Android 12+, fija el [umbral de inicio de AudioTrack](https://developer.android.com/reference/android/media/AudioTrack#setStartThresholdInFrames(int)) en el objetivo de cola, separado de los dos bursts de margen para escribir. La cola recuerda el peor hueco del túnel USB en una ventana de 30 s: sube enseguida ante un hueco mayor y baja hasta un burst cada 20 s, sin pasar por debajo del nivel seguro. Los cortes elevan un piso que decae cada 30 s. El objetivo aprendido se guarda en SharedPreferences para la próxima sesión. Ante una acumulación grande se descarta el exceso para recuperar latencia.
+El sink pide un cuántum de 256 frames (5,3 ms) y sigue procesando aunque no haya audio. Android solicita AudioTrack de baja latencia; obtener una pista rápida depende del teléfono. En Android 12+, fija el [umbral de inicio de AudioTrack](https://developer.android.com/reference/android/media/AudioTrack#setStartThresholdInFrames(int)) en el objetivo de cola, separado de los dos bursts de margen para escribir. La cola recuerda el peor hueco del túnel USB en una ventana de 30 s: sube enseguida ante un hueco mayor y baja hasta un burst cada 20 s, sin pasar por debajo del nivel seguro. Los cortes elevan un piso que decae cada 30 s. El objetivo aprendido se guarda en SharedPreferences para la próxima sesión, separado para adb y AOA. Se conserva el mínimo de dos bursts; AOA se adapta con la misma política de huecos y cortes. Ante una acumulación grande se descarta el exceso para recuperar latencia.
 
 Móvil → PC espera un solo frame de AudioRecord y luego drena hasta 1024 frames disponibles sin bloquear. Así un resto parcial del bloque de REMOTE_SUBMIX se envía enseguida, sin esperar a completar un pedido fijo de 240 frames. Esto no elimina el período de entrega del submix ni el jitter de adb.
 
@@ -209,6 +221,15 @@ Mediciones aportadas por el autor en un **moto g play (2021), Android 11**; no s
 
 Móvil → PC tiene un objetivo promedio inicial de 26 ms; arranca al reunir ese objetivo más medio «serrucho» de los bloques recibidos (estimado inicialmente en 21 ms y luego medido). Cada corte agrega 4 ms, hasta 120 ms. Tras 60 s continuos de reproducción con al menos 4 ms más un ciclo de margen después de consumir audio, baja 4 ms hacia el mínimo de 26 ms. Un corte, margen insuficiente o descarte por acumulación reinicia esa espera; el lazo drena el exceso gradualmente, sin agregar descartes durante la recuperación. Ambos sentidos usan un lazo PI de 0,01 Hz limitado a ±1000 ppm, con dos etapas de filtro y suavizado total de 3 s. El filtro se prepara en el objetivo al arrancar Móvil → PC. Los valores de latencia mostrados son estimaciones; puede aparecer `?` si Android no entrega un timestamp de salida. Ver [la especificación del protocolo](docs/PROTOCOLO.md).
 
+Para medir PLAYER con el teléfono conectado, la APK instalada y ningún hub activo:
+
+```bash
+python3 scripts/measure_player.py --serial SERIAL --transport adb --seconds 310 --output /tmp/medicion-adb
+python3 scripts/measure_player.py --serial SERIAL --transport aoa --seconds 310 --output /tmp/medicion-aoa
+```
+
+La prueba fija el volumen de medios del teléfono en 1, activa `diag:`, usa ruido muy tenue y envía exclusivamente al sink `soundshare_to_phone`; no reproduce por la salida física de la PC. Guarda `hub.log`, `logcat.log` y `summary.json`. **No acepta diálogos USB**: aceptalos personalmente. Revisá `transportes` en el resumen: una solicitud AOA puede medir adb si hubo fallback. El hueco típico se resume como mediana y p95 del máximo de cada segundo; excluye los primeros cinco segundos para huecos/cola. La latencia del hub es aproximada y no incluye una medición acústica. Ver [el informe AOA](docs/MEDICION_AOA.md).
+
 ## Solución de problemas
 
 - **Teléfono `unauthorized`:** desbloquealo y aceptá el diálogo de depuración USB.
@@ -225,11 +246,11 @@ Móvil → PC tiene un objetivo promedio inicial de 26 ms; arranca al reunir ese
 
 ## Limitaciones y próximas ideas
 
-Actualmente necesita Linux/PipeWire, cable USB y depuración USB. No ofrece audio simultáneo en ambos sentidos, interfaz gráfica para la PC ni transporte Wi-Fi. Los formatos emitidos son fijos a 48 kHz estéreo. La latencia tiene el piso del hardware y del túnel adb; el buffer puede crecer con los cortes y los descartes pueden producir un salto audible. La captura usa APIs internas; se verificó en Android 11 y Android 16, sin garantizar todas las versiones ni las modificaciones de cada fabricante.
+Actualmente necesita Linux/PipeWire, cable USB y depuración USB. No ofrece audio simultáneo en ambos sentidos, interfaz gráfica para la PC ni transporte Wi-Fi. Los formatos emitidos son fijos a 48 kHz estéreo. La latencia tiene el piso del hardware y el jitter del transporte elegido; el buffer puede crecer con los cortes y los descartes pueden producir un salto audible. La captura usa APIs internas; se verificó en Android 11 y Android 16, sin garantizar todas las versiones ni las modificaciones de cada fabricante.
 
 Ideas para una **v2**, todavía no implementadas:
 
-- Transporte AOA (Android Open Accessory) directo por USB, sin adbd: explorar menos jitter y PC → Móvil sin depuración USB.
+- PC → Móvil sin depuración USB: AOA ya lleva PLAYER, pero CONTROL todavía usa adb.
 - Interfaz gráfica para la PC.
 - Transporte opcional por Wi-Fi.
 - Más formatos: 24 bits y 44,1/96 kHz.

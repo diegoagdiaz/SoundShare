@@ -11,8 +11,8 @@ import java.nio.ByteOrder
 /**
  * Protocolo entre el teléfono y la PC (ver docs/PROTOCOLO.md).
  *
- * El teléfono siempre abre las conexiones hacia 127.0.0.1:[PORT]; `adb reverse`
- * las lleva por el cable USB hasta el servidor de la PC.
+ * CONTROL y CAPTURE abren las conexiones hacia 127.0.0.1:[PORT]; `adb reverse`
+ * las lleva por el cable USB hasta el servidor de la PC. PLAYER también admite AOA.
  */
 object Protocol {
     const val PORT = 47100
