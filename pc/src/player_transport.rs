@@ -8,6 +8,12 @@ pub enum PlayerTransport {
     Aoa(Session),
 }
 impl PlayerTransport {
+    pub fn is_current(&self) -> bool {
+        match self {
+            Self::Adb(_) => true, // El Hub valida el ID y cierra el socket reemplazado.
+            Self::Aoa(s) => s.is_current(),
+        }
+    }
     pub fn try_clone(&self) -> io::Result<Self> {
         Ok(match self {
             Self::Adb(s) => Self::Adb(s.try_clone()?),

@@ -24,6 +24,7 @@ pub struct Hub {
     /// Salida de PipeWire para Móvil → PC (None = la de por defecto).
     output: Option<String>,
     st: Mutex<State>,
+    aoa_open: Mutex<()>,
     next_id: AtomicU64,
     /// Último estado del reproductor del teléfono (para estadísticas).
     phone: PhoneStats,
@@ -66,6 +67,7 @@ impl Hub {
             port,
             output,
             st: Mutex::new(State { show_stats: true, ..State::default() }),
+            aoa_open: Mutex::new(()),
             next_id: AtomicU64::new(1),
             phone: PhoneStats::default(),
             max_send_us: AtomicU32::new(0),
@@ -252,12 +254,13 @@ impl Hub {
     /// Si la app cerró su lado del accesorio (se reinició o se reinstaló), el cable sigue en modo
     /// AOA: reabrimos la interfaz sin conmutar para que PLAYER no se quede en adb.
     fn reopen_aoa(self: &Arc<Self>) {
+        let _opening = self.aoa_open.lock().unwrap();
         let serial = {
             let mut st = self.st.lock().unwrap();
             if !st.aoa.as_ref().is_some_and(|a| !a.alive()) { return; }
             let Some(serial) = st.device.as_ref().map(|d| d.serial.clone()) else { return };
             // Soltar la interfaz reclamada antes de volver a abrirla.
-            st.aoa = None;
+            if let Some(old) = st.aoa.take() { old.stop(); }
             serial
         };
         match crate::aoa::reopen(&serial) {
@@ -355,18 +358,24 @@ impl Hub {
         let id = self.id();
         let shared = {
             let mut st = self.st.lock().unwrap();
-            let Some(shared) = st.sink.clone().filter(|_| !st.shutting_down && st.mode == Mode::PcToPhone) else { sock.close(); return };
+            let Some(shared) = st.sink.clone().filter(|_| !st.shutting_down && st.mode == Mode::PcToPhone && sock.is_current()) else { sock.close(); return };
+            let Ok(clone) = sock.try_clone() else { sock.close(); return };
             if let Some((_, old)) = st.player.take() {
                 old.close();
             }
-            let Ok(clone) = sock.try_clone() else { return };
             st.player = Some((id, clone));
             shared
         };
         let _consumer = shared.consumer.lock().unwrap();
+        if !self.player_is_current(id) || !sock.is_current() {
+            sock.close();
+            self.finish_player(id);
+            return;
+        }
         shared.ring.clear();
         if sock.format(&SINK_FORMAT.encode()).is_err() {
             sock.close();
+            self.finish_player(id);
             return;
         }
         println!("  Audio de la PC → teléfono por {}: {} Hz, float 32 bits, estéreo", sock.label(), SINK_FORMAT.rate);
@@ -374,7 +383,7 @@ impl Hub {
         let status = sock.try_clone().ok().map(|rs| {
             let hub = self.clone();
             let shared = shared.clone();
-            thread::spawn(move || hub.player_status_loop(rs, shared))
+            thread::spawn(move || hub.player_status_loop(id, rs, shared))
         });
 
         let buffer_size = match &sock { PlayerTransport::Adb(_) => 32 * 1024, PlayerTransport::Aoa(_) => crate::aoa_frame::MAX_PCM };
@@ -383,6 +392,9 @@ impl Hub {
         'send: loop {
             shared.wake.wait(100);
             loop {
+                if !self.player_is_current(id) || !sock.is_current() {
+                    break 'send;
+                }
                 let n = shared.ring.pop(&mut buf);
                 if n == 0 {
                     break;
@@ -394,8 +406,7 @@ impl Hub {
                 self.max_send_us.fetch_max(((now - last_send) / 1000) as u32, Ordering::Relaxed);
                 last_send = now;
             }
-            let still_current = self.st.lock().unwrap().player.as_ref().is_some_and(|(pid, _)| *pid == id);
-            if !still_current {
+            if !self.player_is_current(id) {
                 break;
             }
         }
@@ -403,6 +414,14 @@ impl Hub {
         if let Some(t) = status {
             let _ = t.join();
         }
+        self.finish_player(id);
+    }
+
+    fn player_is_current(&self, id: u64) -> bool {
+        self.st.lock().unwrap().player.as_ref().is_some_and(|(pid, _)| *pid == id)
+    }
+
+    fn finish_player(&self, id: u64) {
         let mut st = self.st.lock().unwrap();
         if st.player.as_ref().is_some_and(|(pid, _)| *pid == id) {
             st.player = None;
@@ -410,7 +429,7 @@ impl Hub {
     }
 
     /// El teléfono informa su cola cada ~10 ms; el lazo la lleva al objetivo ajustando nuestro reloj.
-    fn player_status_loop(&self, mut sock: PlayerTransport, shared: Arc<SinkShared>) {
+    fn player_status_loop(&self, id: u64, mut sock: PlayerTransport, shared: Arc<SinkShared>) {
         let mut control = RateLoop::new(engine::LOOP_BANDWIDTH_HZ, engine::LOOP_MAX_PPM, engine::LOOP_SMOOTHING_S);
         let rate = SINK_FORMAT.rate as f64;
         let frame = SINK_FORMAT.frame_bytes();
@@ -421,6 +440,11 @@ impl Hub {
                 Ok(()) => {}
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(_) => break,
+            }
+            // read_exact puede devolver un estado viejo después de que otra sesión tomó el sink.
+            let st = self.st.lock().unwrap();
+            if !st.player.as_ref().is_some_and(|(pid, _)| *pid == id) || !sock.is_current() {
+                break;
             }
             let s = PlayerStatus::decode(&b);
             let now = Instant::now();
@@ -436,7 +460,10 @@ impl Hub {
             self.phone.output_latency.store(s.output_latency, Ordering::Relaxed);
         }
         sock.close();
-        shared.rate_dev.store(0.0);
+        let st = self.st.lock().unwrap();
+        if st.player.as_ref().is_some_and(|(pid, _)| *pid == id) {
+            shared.rate_dev.store(0.0);
+        }
     }
 
     /// Móvil → PC: lo que manda el capturador va al ring que lee PipeWire.

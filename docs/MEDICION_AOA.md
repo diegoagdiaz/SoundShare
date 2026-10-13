@@ -38,7 +38,7 @@ Se eligió cabecera de 12 bytes más **un byte de padding**, con payload par. El
 
 Cada corrida formal reproduce 310 s de PCM continuo con ruido a pico de −60 dBFS y volumen de medios del teléfono en 1. El generador usa exclusivamente `soundshare_to_phone`; un null sink queda como destino de respaldo si desaparece el sink del Hub. El teléfono conserva la pista rápida de AudioTrack, burst de 240 frames y capacidad de 9600 frames. No se reproduce sonido por los parlantes de la laptop.
 
-`diag:` registra el máximo de hueco y mínimo de cola de cada segundo. El hueco descuenta el tiempo de escritura propio en AudioTrack. Se excluyen los primeros cinco segundos para resumir hueco y cola; los contadores de underruns se conservan desde el arranque. «Típico» es la mediana de máximos por segundo; se informa también p95 y máximo absoluto. Cola y objetivo se convierten a ms con 48 frames/ms. La latencia es la **aproximación del hub**, no una medición acústica; la app marca parcial la etapa USB AOA porque PING/PONG sigue en CONTROL/adb.
+`diag:` registra el máximo de hueco y mínimo de cola de cada segundo. El hueco descuenta el tiempo de escritura propio en AudioTrack. Se excluyen los primeros cinco segundos para resumir hueco y cola; los contadores de underruns se conservan desde el arranque. «Típico» es la mediana de máximos por segundo; se informa también p95 y máximo absoluto. Cola y objetivo se convierten a ms con 48 frames/ms. La latencia es la **aproximación del hub**, no una medición acústica; la app usa 0 ms para la etapa USB AOA: PING/PONG sigue en CONTROL/adb y no mide el accesorio. Ese 0 es una aproximación, no una medición.
 
 Las corridas formales se hicieron sin compilaciones concurrentes. AOA usa el lector con prioridad de audio. Cada una mantuvo una sola sesión PLAYER durante 310 s y produjo 308 ventanas `diag:`.
 
@@ -61,7 +61,7 @@ Se conservan `MIN_BURSTS = 2` (10 ms en este teléfono) e `INITIAL_TARGET_MS = 3
 
 La corrida AOA anterior, con lector normal y arranque en 30 ms, dio en 310 s: típico 8,205 ms, p95 12,905 ms, peor 20,609 ms, 2 underruns, objetivo final 20 ms y latencia del hub mediana/final 54/49 ms. Es una sola corrida por variante, no una garantía estadística para otros teléfonos o cargas.
 
-Se guardan [los resúmenes JSON](mediciones/player-2026-10-13/resumen.json), [las ventanas adb](mediciones/player-2026-10-13/adb.csv), [las ventanas AOA](mediciones/player-2026-10-13/aoa.csv) y los logs del hub en ese directorio. Los CSV incluyen el arranque; el resumen excluye sus primeras cinco ventanas de hueco/cola.
+Los resultados y el método quedan resumidos en este documento autocontenido. Se retiraron del repositorio los logs, CSV y JSON crudos; la tabla excluye las primeras cinco ventanas de hueco/cola. El script permite generar evidencia nueva localmente.
 
 La primera corrida adb, durante compilaciones de Rust/Android en la PC, duró 310 s (307 diag): mediana 14,331 ms, p95 22,847 ms, peor hueco 35,897 ms, cola mínima 256 frames (5,33 ms), objetivo final 1680 frames (35 ms), 5 underruns, latencia del hub mediana 71 ms y final 65 ms. Se conserva como medición con carga; no se presenta como comparación aislada del transporte.
 
@@ -73,7 +73,7 @@ Se usaron las cabeceras ya extraídas en `/tmp/pwdev/root`, sin sudo:
 PKG_CONFIG_PATH=/tmp/pwdev/root/usr/lib64/pkgconfig \
 PKG_CONFIG_SYSROOT_DIR=/tmp/pwdev/root cargo test --manifest-path pc/Cargo.toml
 PKG_CONFIG_PATH=/tmp/pwdev/root/usr/lib64/pkgconfig \
-PKG_CONFIG_SYSROOT_DIR=/tmp/pwdev/root ./scripts/build.sh --pc
+PKG_CONFIG_SYSROOT_DIR=/tmp/pwdev/root cargo build --manifest-path pc/Cargo.toml
 JAVA_HOME=$HOME/.gradle/jdks/jdk-21.0.12+8 \
 android/gradlew -p android testDebugUnitTest assembleDebug
 ```

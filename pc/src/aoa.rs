@@ -4,7 +4,7 @@ use rusb::{DeviceHandle, Direction, GlobalContext, TransferType};
 use std::collections::VecDeque;
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -165,7 +165,7 @@ pub fn prepare(serial: &str) -> io::Result<Arc<Link>> {
                     alt.interface_number()
                 );
                 return Ok(Arc::new(Link {
-                    handle,
+                    handle: RwLock::new(Some(handle)),
                     input,
                     output,
                     alive: AtomicBool::new(true),
@@ -181,7 +181,7 @@ pub fn prepare(serial: &str) -> io::Result<Arc<Link>> {
 }
 
 pub struct Link {
-    handle: DeviceHandle<GlobalContext>,
+    handle: RwLock<Option<DeviceHandle<GlobalContext>>>,
     input: u8,
     output: u8,
     alive: AtomicBool,
@@ -193,9 +193,13 @@ struct Inbox {
     wake: Condvar,
 }
 impl Inbox {
-    fn finish(&self) {
-        self.bytes.lock().unwrap().1 = true;
+    fn finish(&self) -> bool {
+        let mut state = self.bytes.lock().unwrap();
+        let changed = !state.1;
+        state.1 = true;
+        state.0.clear();
         self.wake.notify_all();
+        changed
     }
 }
 impl Link {
@@ -207,18 +211,24 @@ impl Link {
         if let Some((_, q)) = self.current.lock().unwrap().take() {
             q.finish();
         }
+        // Las sesiones/lectores pueden retener Arc<Link>; liberar el handle no depende de su Drop.
+        // El lock exclusivo espera los bulk pendientes (200/500 ms) y evita IO tras el reclaim.
+        self.handle.write().unwrap().take();
     }
-    fn send(&self, kind: u8, id: u32, b: &[u8]) -> io::Result<()> {
-        let bytes = frame::encode(kind, id, b)?;
+    fn send(&self, kind: u8, session: &Session, b: &[u8]) -> io::Result<()> {
+        let bytes = frame::encode(kind, session.id, b)?;
         let _guard = self.writer.lock().unwrap();
-        if !self.alive() {
-            return Err(io::Error::other("accesorio desconectado"));
+        // Validar al salir de la cola de escritores, no antes de esperar su mutex.
+        if !session.is_current() || (kind != frame::END && session.inbox.bytes.lock().unwrap().1) {
+            return Err(io::Error::other("sesión AOA terminada"));
         }
         // Una escritura bulk completa por bloque; la cola no se agrega al hilo RT.
-        match self
-            .handle
-            .write_bulk(self.output, &bytes, Duration::from_millis(500))
-        {
+        let result = {
+            let handle = self.handle.read().unwrap();
+            handle.as_ref().ok_or_else(|| io::Error::other("enlace AOA cerrado"))?
+                .write_bulk(self.output, &bytes, Duration::from_millis(500))
+        };
+        match result {
             Ok(n) if n == bytes.len() => Ok(()),
             other => {
                 self.stop();
@@ -246,6 +256,9 @@ impl Link {
                         break;
                     }
                 };
+                if !self.alive() {
+                    break;
+                }
                 match f.kind {
                     frame::HELLO => {
                         if protocol::read_hello(&mut f.payload.as_slice()).ok()
@@ -257,10 +270,16 @@ impl Link {
                             bytes: Mutex::new((VecDeque::new(), false)),
                             wake: Condvar::new(),
                         });
-                        if let Some((_, old)) =
-                            self.current.lock().unwrap().replace((f.session, q.clone()))
                         {
-                            old.finish();
+                            // Una sesión nueva empieza después del último write de la anterior.
+                            let _writer = self.writer.lock().unwrap();
+                            let mut current = self.current.lock().unwrap();
+                            if !self.alive() {
+                                break;
+                            }
+                            if let Some((_, old)) = current.replace((f.session, q.clone())) {
+                                old.finish();
+                            }
                         }
                         let session = Session {
                             link: self.clone(),
@@ -280,8 +299,12 @@ impl Link {
                                 q.finish();
                             } else {
                                 let mut state = q.bytes.lock().unwrap();
-                                if state.0.len() > 4096 {
+                                if state.1 {
+                                    continue;
+                                }
+                                if state.0.len() + f.payload.len() > 4096 {
                                     state.1 = true;
+                                    state.0.clear();
                                 } else {
                                     state.0.extend(f.payload);
                                 }
@@ -312,11 +335,12 @@ impl Read for UsbReader {
             if !self.link.alive() {
                 return Ok(0);
             }
-            match self.link.handle.read_bulk(
-                self.link.input,
-                &mut self.buf,
-                Duration::from_millis(200),
-            ) {
+            let result = {
+                let handle = self.link.handle.read().unwrap();
+                let Some(handle) = handle.as_ref() else { return Ok(0) };
+                handle.read_bulk(self.link.input, &mut self.buf, Duration::from_millis(200))
+            };
+            match result {
                 Ok(0) => continue,
                 Ok(n) => {
                     self.pos = 0;
@@ -339,15 +363,19 @@ pub struct Session {
     inbox: Arc<Inbox>,
 }
 impl Session {
+    pub fn is_current(&self) -> bool {
+        self.link.alive()
+            && self.link.current.lock().unwrap().as_ref().is_some_and(|(id, q)| {
+                *id == self.id && Arc::ptr_eq(q, &self.inbox)
+            })
+    }
     pub fn send(&self, kind: u8, b: &[u8]) -> io::Result<()> {
-        if kind != frame::END && self.inbox.bytes.lock().unwrap().1 {
-            return Err(io::Error::other("sesión AOA terminada"));
-        }
-        self.link.send(kind, self.id, b)
+        self.link.send(kind, self, b)
     }
     pub fn close(&self) {
-        self.inbox.finish();
-        let _ = self.send(frame::END, &[]);
+        if self.inbox.finish() {
+            let _ = self.send(frame::END, &[]);
+        }
     }
 }
 impl Read for Session {
@@ -369,6 +397,9 @@ impl Read for Session {
                     "sin estado PLAYER AOA",
                 ));
             }
+        }
+        if state.1 {
+            return Ok(0);
         }
         let n = b.len().min(state.0.len());
         for dest in &mut b[..n] {

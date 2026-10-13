@@ -29,4 +29,20 @@ class AccessoryInboxTest {
         input.receive(byteArrayOf(1));input.receive(byteArrayOf(2))
         assertEquals(-1,input.read());assertFalse(input.peerEnded)
     }
+    @Test fun endDiscardsBufferedSuffixAndFullQueueWithoutTouchingNewInbox() {
+        val old = AccessoryInbox(1)
+        old.receive(byteArrayOf(1,2,3))
+        assertEquals(1,old.read())
+        old.receive(byteArrayOf(4,5))
+        assertTrue(old.finish())
+        val current = AccessoryInbox()
+        current.receive(byteArrayOf(9))
+        old.receive(byteArrayOf(6))
+        assertFalse(old.finish(true))
+        assertTrue(old.peerEnded)
+        assertEquals(-1,old.read())
+        assertEquals(0,old.available())
+        assertEquals(9,current.read())
+        assertFalse(current.isEnded)
+    }
 }

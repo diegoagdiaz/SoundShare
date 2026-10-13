@@ -1,8 +1,0 @@
-[captura] no se pudo iniciar el grabador: java.lang.IllegalStateException: Android no permitió abrir REMOTE_SUBMIX
-[captura] preparando la captura de Android 11 fuera de pantalla
-[captura] capturando 48000 Hz, 2 canales, 16 bits
-[captura] lecturas/s=46 hueco máx=44758 µs
-[captura] lecturas/s=47 hueco máx=22709 µs
-[captura] captura terminada
-API 30: 105472 frames PCM recibidos; inicio y salida correctos.
-Sin ventanas en la pantalla principal; 2 eventos auxiliares fuera de pantalla; recursos liberados.

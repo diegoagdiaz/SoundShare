@@ -5,7 +5,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.hardware.usb.UsbAccessory
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -17,12 +16,11 @@ import java.util.concurrent.atomic.AtomicInteger
 /** Descriptor persistente por cable; los modos abren sesiones lógicas, no lectores USB nuevos. */
 class AccessoryTransport(private val context: Context, private val onReady: () -> Unit) {
     private val usb = context.getSystemService(UsbManager::class.java)
-    // Un pedido de permiso por conexión del cable. No comparamos UsbAccessory: su equals() lee el
-    // número de serie, y sin permiso eso lanza SecurityException.
+    // Un pedido por cable; UsbAccessory.equals() lee la serie y sin permiso lanza SecurityException.
     private var requested = false
-    @Volatile private var descriptor: ParcelFileDescriptor? = null
-    @Volatile private var output: OutputStream? = null
-    @Volatile private var current: Session? = null
+    private class Link(val descriptor: ParcelFileDescriptor, val output: OutputStream)
+    private var link: Link? = null
+    private var current: Session? = null
     @Volatile private var closed = false
     @Volatile private var failed = false
     private val ids = AtomicInteger(java.security.SecureRandom().nextInt().let { if (it == 0) 1 else it })
@@ -33,7 +31,9 @@ class AccessoryTransport(private val context: Context, private val onReady: () -
                 PERMISSION -> if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED,false)) {
                     prepare(); onReady()
                 } else Log.i(TAG,"permiso AOA rechazado; PLAYER sigue por adb")
-                UsbManager.ACTION_USB_ACCESSORY_DETACHED -> { release(); requested = false; failed = false }
+                UsbManager.ACTION_USB_ACCESSORY_DETACHED -> synchronized(this@AccessoryTransport) {
+                    release(); requested = false; failed = false
+                }
             }
         }
     }
@@ -44,7 +44,7 @@ class AccessoryTransport(private val context: Context, private val onReady: () -
     }
 
     @Synchronized fun prepare() {
-        if (closed || failed || descriptor != null) return
+        if (closed || failed || link != null) return
         val accessory = usb.accessoryList?.firstOrNull { it.manufacturer == "SoundShare" && it.model == "SoundShare" && it.version == "1" } ?: return
         if (!usb.hasPermission(accessory)) {
             if (!requested) {
@@ -58,26 +58,34 @@ class AccessoryTransport(private val context: Context, private val onReady: () -
         }
         try {
             val fd = usb.openAccessory(accessory) ?: throw IOException("openAccessory devolvió null")
-            descriptor = fd
-            output = FileOutputStream(fd.fileDescriptor)
+            val opened = Link(fd, FileOutputStream(fd.fileDescriptor))
+            link = opened
             val input = LargeReads(FileInputStream(fd.fileDescriptor))
             Thread({
                 try {
                     // Este hilo entrega PCM al Player urgente: evitar una espera adicional del scheduler.
                     Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-                    while (!closed && descriptor === fd) {
+                    while (synchronized(this) { !closed && link === opened }) {
                         val frame = AccessoryFrame.read(input)
-                        val session = current?.takeIf { it.id == frame.session } ?: continue
-                        when (frame.kind) {
-                            AccessoryFrame.FORMAT, AccessoryFrame.PCM -> session.receive(frame.payload)
-                            AccessoryFrame.END -> session.finish(true)
-                            else -> throw IOException("tipo AOA inesperado")
+                        synchronized(this) {
+                            // La lectura puede terminar después del cierre y de una reconexión.
+                            if (link !== opened) return@synchronized
+                            val session = current?.takeIf { it.id == frame.session } ?: return@synchronized
+                            when (frame.kind) {
+                                AccessoryFrame.FORMAT, AccessoryFrame.PCM -> session.receive(frame.payload)
+                                AccessoryFrame.END -> session.finish(true)
+                                else -> throw IOException("tipo AOA inesperado")
+                            }
                         }
                     }
                 } catch (e: Exception) {
-                    if (!closed) Log.w(TAG,"lector AOA: ${e.message}; fallback adb")
+                    synchronized(this) {
+                        if (!closed && link === opened) Log.w(TAG,"lector AOA: ${e.message}; fallback adb")
+                    }
                 } finally {
-                    if (descriptor === fd) { failed = true; release() }
+                    synchronized(this) {
+                        if (link === opened) { failed = true; release() }
+                    }
                 }
             },"ss-accessory-read").apply { isDaemon = true; start() }
             Log.i(TAG,"accesorio abierto; lecturas USB de 16384 bytes")
@@ -86,29 +94,36 @@ class AccessoryTransport(private val context: Context, private val onReady: () -
 
     @Synchronized fun connect(): Session? {
         prepare()
-        if (output == null || failed || closed) return null
+        if (link == null || failed || closed) return null
         current?.finish()
         val id = ids.getAndIncrement().let { if (it == 0) ids.getAndIncrement() else it }
         return Session(id).also { current = it }
     }
-    fun disable() { failed = true; release() }
-    private fun send(kind: Int, id: Int, payload: ByteArray) {
-        val bytes = AccessoryFrame.encode(kind,id,payload)
+    @Synchronized fun disable(session: Session) {
+        if (current !== session) return
+        failed = true; release()
+    }
+    private fun send(kind: Int, session: Session, opened: Link, payload: ByteArray) {
+        val bytes = AccessoryFrame.encode(kind,session.id,payload)
         synchronized(writeLock) {
-            val out = output ?: throw IOException("accesorio cerrado")
+            val out = synchronized(this) {
+                if (closed || link !== opened || current !== session ||
+                    (kind != AccessoryFrame.END && session.input.isEnded)) throw IOException("sesión AOA cerrada")
+                opened.output
+            }
             out.write(bytes)
         }
     }
-    private fun release() {
+    @Synchronized private fun release() {
         current?.finish(); current = null
-        output = null
-        val fd = descriptor; descriptor = null
+        val fd = link?.descriptor; link = null
         // close() tampoco tiene garantía de desbloquear read(): jamás esperamos al lector USB.
         Thread({ runCatching { fd?.close() } },"ss-accessory-close").apply { isDaemon = true; start() }
     }
-    fun close() { closed = true; context.unregisterReceiver(receiver); release() }
+    @Synchronized fun close() { closed = true; context.unregisterReceiver(receiver); release() }
 
-    inner class Session(val id: Int) : Closeable {
+    inner class Session internal constructor(val id: Int) : Closeable {
+        private val opened = checkNotNull(link)
         val input = AccessoryInbox()
         val peerEnded get() = input.peerEnded
         fun receive(payload: ByteArray) = input.receive(payload)
@@ -118,13 +133,13 @@ class AccessoryTransport(private val context: Context, private val onReady: () -
             override fun write(b: ByteArray, off: Int, len: Int) {
                 if (input.isEnded) throw IOException("sesión AOA cerrada")
                 val kind = if (len == 8) AccessoryFrame.HELLO else AccessoryFrame.STATUS
-                send(kind,id,b.copyOfRange(off,off+len))
+                send(kind,this@Session,opened,b.copyOfRange(off,off+len))
             }
         }
         override fun close() {
-            finish()
+            if (!input.finish()) return
             // Un write USB pendiente tampoco bloquea el cambio de modo ni el hilo de UI.
-            Thread({ runCatching { send(AccessoryFrame.END,id,ByteArray(0)) } },"ss-accessory-end")
+            Thread({ runCatching { send(AccessoryFrame.END,this,opened,ByteArray(0)) } },"ss-accessory-end")
                 .apply { isDaemon = true; start() }
         }
     }
