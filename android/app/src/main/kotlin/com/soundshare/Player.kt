@@ -215,6 +215,9 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
             var dropFrames = 0L
             var underrunBase = 0
             var lastUnderruns = 0
+            // Mínimo de la pista justo antes de cada llegada, en este período de estado y el anterior.
+            var lowest = Int.MAX_VALUE
+            var lowestBefore = Int.MAX_VALUE
             var playStart = 0L
             var lastStatus = 0L
             var lastUi = 0L
@@ -264,6 +267,7 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
                 }
                 writeNs = 0
                 if (whole > off) {
+                    lowest = minOf(lowest, trackLevel().toInt())
                     direct.clear()
                     direct.put(buf, off, whole - off)
                     direct.flip()
@@ -296,11 +300,16 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
                 val underruns = track.underrunCount - underrunBase
                 if (underruns > lastUnderruns) {
                     lastUnderruns = underruns
-                    if (now - playStart > SETTLE_NS && target.onUnderrun(now)) {
+                    val low = minOf(lowest, lowestBefore)
+                    if (now - playStart > SETTLE_NS && target.onUnderrun(now, low)) {
                         applyTarget()
                         Log.i(TAG, "corte de audio → objetivo ${target.frames} frames")
+                    } else if (low >= burst) {
+                        Log.i(TAG, "corte de la salida con $low frames en la pista: objetivo sin cambios")
                     }
                 }
+                lowestBefore = lowest
+                lowest = Int.MAX_VALUE
                 if (target.tick(now)) applyTarget()
                 val t = target.frames
                 // Si por un tirón del USB se acumuló mucho, descartamos el exceso de una vez:

@@ -9,7 +9,8 @@ package com.soundshare
  *  - Si la conexión se calma, baja de a un burst cada [STEP_DOWN_NS]. Bajar despacio importa:
  *    cada cambio de objetivo lo absorbe la PC ajustando su reloj, y cuantos menos cambios,
  *    más estable la afinación.
- *  - Cada corte real sube además un piso que se va olvidando despacio.
+ *  - Cada corte real sube además un piso que se va olvidando despacio. Un corte con la pista
+ *    llena no lo causó la cola (lo produjo la salida de Android) y no la agranda.
  */
 class QueueTarget(private val burst: Int, sampleRate: Int, private val maxFrames: Int, initial: Int) {
     private val nsPerFrame = 1_000_000_000.0 / sampleRate
@@ -31,7 +32,12 @@ class QueueTarget(private val burst: Int, sampleRate: Int, private val maxFrames
         return update(now)
     }
 
-    fun onUnderrun(now: Long): Boolean {
+    /**
+     * [lowestFrames]: lo mínimo que tuvo la pista justo antes de recibir audio, alrededor del corte.
+     * Si nunca bajó de un burst, el mezclador tenía datos de sobra y el corte fue de la salida.
+     */
+    fun onUnderrun(now: Long, lowestFrames: Int = 0): Boolean {
+        if (lowestFrames >= burst) return false
         floor = (frames + burst).coerceAtMost(maxFrames)
         lastUnderrun = now
         return update(now)

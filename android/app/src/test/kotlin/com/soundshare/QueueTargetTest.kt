@@ -90,6 +90,21 @@ class QueueTargetTest {
         assertEquals(1500, target.frames)
     }
 
+    @Test
+    fun underrunWithAFullTrackLeavesTheTargetAlone() {
+        val target = target(initial = 768)
+        target.tick(START_NS)
+
+        // Medido en el moto g play: dos cortes con 27 ms en la pista, a los 6-7 s de arrancar.
+        assertFalse(target.onUnderrun(START_NS + 1, lowestFrames = 1300))
+        assertEquals(768, target.frames)
+        assertFalse(target.onUnderrun(START_NS + 2, lowestFrames = 256))
+        assertEquals(768, target.frames)
+
+        assertTrue(target.onUnderrun(START_NS + 3, lowestFrames = 255))
+        assertEquals(1024, target.frames)
+    }
+
     private fun target(initial: Int) = QueueTarget(256, 48_000, maxFrames = 4800, initial = initial)
 
     companion object {
