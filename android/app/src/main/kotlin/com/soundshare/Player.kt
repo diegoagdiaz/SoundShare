@@ -155,14 +155,15 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
             val learnedKey = if (transport == "adb") "target_ms_${fmt.sampleRate}" else "target_ms_aoa_${fmt.sampleRate}"
             val initialMs = prefs.getFloat(learnedKey, INITIAL_TARGET_MS)
             val target = QueueTarget(burst, fmt.sampleRate, capacity / 2, (initialMs * fmt.sampleRate / 1000).toInt())
+            var bufferFrames = 0
             fun applyTarget() {
                 if (!run.active) return
                 // El umbral de escritura queda por encima del objetivo: write() casi nunca bloquea.
-                val bufferFrames = track.setBufferSizeInFrames((target.frames + 2 * burst).coerceAtMost(capacity))
+                val requested = track.setBufferSizeInFrames((target.frames + 2 * burst).coerceAtMost(capacity))
+                bufferFrames = if (requested > 0) requested else track.bufferSizeInFrames
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     // Arrancar al reunir el objetivo, sin esperar también el margen de escritura.
-                    val actualBufferFrames = if (bufferFrames > 0) bufferFrames else track.bufferSizeInFrames
-                    track.setStartThresholdInFrames(minOf(target.frames, actualBufferFrames).coerceAtLeast(1))
+                    track.setStartThresholdInFrames(minOf(target.frames, bufferFrames).coerceAtLeast(1))
                 }
                 // Guardar al ajustar: un hilo cancelado no puede persistir por encima del nuevo.
                 run.ifActive { prefs.edit().putFloat(learnedKey, target.frames * 1000f / fmt.sampleRate).apply() }
@@ -173,19 +174,51 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
 
             val buf = ByteArray(frameBytes * 1024)
             val direct = ByteBuffer.allocateDirect(buf.size).order(ByteOrder.nativeOrder())
+            val silence = ByteBuffer.allocateDirect(burst * frameBytes)
             val status = ByteBuffer.allocate(Protocol.STATUS_BYTES)
             val ts = AudioTimestamp()
             var fill = 0
             var framesWritten = 0L
             var headTotal = 0L
             var lastHead = 0L
-            var dropFrames = 0L
+
+            /** Frames que el mezclador todavía no leyó de la pista. */
+            fun trackLevel(): Long {
+                val head = track.playbackHeadPosition.toLong() and 0xffffffffL
+                headTotal += (head - lastHead) and 0xffffffffL
+                lastHead = head
+                return framesWritten - headTotal
+            }
+
+            fun writeSilence(frames: Long) {
+                var left = frames
+                while (left > 0 && run.active) {
+                    silence.clear()
+                    silence.limit((minOf(left, burst.toLong()) * frameBytes).toInt())
+                    val w = run.ifActive { track.write(silence, silence.remaining(), AudioTrack.WRITE_NON_BLOCKING) } ?: return
+                    if (w < 0) throw IOException("AudioTrack.write = $w")
+                    if (w == 0) return
+                    framesWritten += w / frameBytes
+                    left -= w / frameBytes
+                }
+            }
+
+            // Arranque en silencio: lo que llega mientras Android despierta la salida se descarta sin
+            // oírse, y el audio real entra con la cola ya en el objetivo. Antes se acumulaba (20-130 ms
+            // medidos) y había que descartarlo con un salto en pleno audio. El buffer entero de silencio
+            // alcanza el umbral de arranque también en Android 8-11, que no permite bajarlo.
+            writeSilence(bufferFrames.toLong())
+            run.ifActive { track.play() } ?: return
+            val prerollStart = SystemClock.elapsedRealtimeNanos()
+            var outputSince = 0L
             var started = false
+            var dropFrames = 0L
+            var underrunBase = 0
             var lastUnderruns = 0
             var playStart = 0L
             var lastStatus = 0L
             var lastUi = 0L
-            var lastRead = SystemClock.elapsedRealtimeNanos()
+            var lastRead = prerollStart
             var writeNs = 0L
             // Diagnóstico (logcat): huecos entre lecturas del socket y cola mínima por segundo.
             var maxGap = 0L
@@ -201,13 +234,31 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
                 val gap = arrived - lastRead - writeNs
                 lastRead = arrived
                 if (started && arrived - playStart > SETTLE_NS && target.onGap(gap, arrived)) applyTarget()
-                if (DIAG) maxGap = maxOf(maxGap, gap)
+                if (DIAG && started) maxGap = maxOf(maxGap, gap)
                 fill += n
                 val whole = fill - fill % frameBytes
                 var off = 0
 
+                if (!started) {
+                    val level = trackLevel()
+                    val waited = arrived - prerollStart
+                    val presenting = track.getTimestamp(ts) && ts.framePosition > 0
+                    if (outputSince == 0L && (presenting || (waited > PREROLL_FALLBACK_NS && headTotal > 0))) outputSince = arrived
+                    // Los primeros ciclos del mezclador rápido son irregulares (su warmup): que pasen en silencio.
+                    val running = outputSince != 0L && arrived - outputSince > OUTPUT_SETTLE_NS
+                    if ((running && level <= target.frames) || waited > PREROLL_MAX_NS) {
+                        started = true
+                        playStart = arrived
+                        // Los cortes del silencio inicial no se oyeron: la cuenta empieza acá.
+                        underrunBase = track.underrunCount
+                        Log.i(TAG, "salida en marcha a los ${waited / 1_000_000} ms; el audio entra con $level frames en la pista")
+                    } else {
+                        if (level < target.frames) writeSilence(target.frames - level)
+                        off = whole
+                    }
+                }
                 if (dropFrames > 0) {
-                    val d = minOf(dropFrames, (whole / frameBytes).toLong()).toInt()
+                    val d = minOf(dropFrames, ((whole - off) / frameBytes).toLong()).toInt()
                     off += d * frameBytes
                     dropFrames -= d
                 }
@@ -224,11 +275,6 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
                         if (w < 0) throw IOException("AudioTrack.write = $w")
                         framesWritten += w / frameBytes
                         if (!run.active) break
-                        if (!started && (framesWritten >= target.frames || w == 0)) {
-                            run.ifActive { track.play() } ?: break
-                            started = true
-                            playStart = SystemClock.elapsedRealtimeNanos()
-                        }
                         if (w == 0) SystemClock.sleep(1)
                     }
                     writeNs = SystemClock.elapsedRealtimeNanos() - arrived
@@ -237,25 +283,18 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
                 // Lo que sobra (un frame partido) queda al principio para la próxima lectura.
                 System.arraycopy(buf, whole, buf, 0, fill - whole)
                 fill -= whole
-
-                if (!started && framesWritten >= target.frames) {
-                    run.ifActive { track.play() } ?: break
-                    started = true
-                    playStart = SystemClock.elapsedRealtimeNanos()
-                }
+                // La PC recibe el primer estado con el audio real ya entrando, cerca del objetivo.
+                if (!started) continue
 
                 val now = SystemClock.elapsedRealtimeNanos()
                 if (now - lastStatus < STATUS_PERIOD_NS) continue
                 lastStatus = now
 
-                val head = track.playbackHeadPosition.toLong() and 0xffffffffL
-                headTotal += (head - lastHead) and 0xffffffffL
-                lastHead = head
                 val inSocket = (input.available() + fill) / frameBytes
-                val queued = (framesWritten - headTotal + inSocket).toInt()
+                val queued = (trackLevel() + inSocket).toInt()
 
-                val underruns = track.underrunCount
-                if (started && underruns > lastUnderruns) {
+                val underruns = track.underrunCount - underrunBase
+                if (underruns > lastUnderruns) {
                     lastUnderruns = underruns
                     if (now - playStart > SETTLE_NS && target.onUnderrun(now)) {
                         applyTarget()
@@ -263,16 +302,16 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
                     }
                 }
                 if (target.tick(now)) applyTarget()
-                // Si por un tirón del USB (o el arranque del parlante) se acumuló mucho, descartamos
-                // el exceso de una vez: preferimos un salto corto a quedarnos con latencia de más.
                 val t = target.frames
-                if (started && dropFrames == 0L && queued > t + maxOf(t, fmt.sampleRate / 20)) {
+                // Si por un tirón del USB se acumuló mucho, descartamos el exceso de una vez:
+                // preferimos un salto corto a quedarnos con latencia de más.
+                if (dropFrames == 0L && queued > t + maxOf(t, fmt.sampleRate / 20)) {
                     dropFrames = (queued - t).toLong()
                     Log.i(TAG, "cola de $queued frames, descarto $dropFrames")
                 }
 
                 var outputLatency = -1
-                if (started && track.getTimestamp(ts)) {
+                if (track.getTimestamp(ts)) {
                     val presented = ts.framePosition + (System.nanoTime() - ts.nanoTime) * fmt.sampleRate / 1_000_000_000L
                     val pending = framesWritten - presented
                     val timestampAge = System.nanoTime() - ts.nanoTime
@@ -321,6 +360,12 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
         private const val STATUS_PERIOD_NS = 10_000_000L
         /** Lo primero tras arrancar el parlante no cuenta (Android tarda en despertar el hardware). */
         private const val SETTLE_NS = 700_000_000L
+        /** Sin timestamps de salida, alcanza con que el mezclador ya lea de la pista. */
+        private const val PREROLL_FALLBACK_NS = 300_000_000L
+        /** Silencio que sigue después de que la salida empezó a sonar. */
+        private const val OUTPUT_SETTLE_NS = 100_000_000L
+        /** Si la salida no arranca, el audio entra igual: nunca más que esto en silencio. */
+        private const val PREROLL_MAX_NS = 1_500_000_000L
         private const val UI_PERIOD_NS = 250_000_000L
         private val DIAG = Log.isLoggable(TAG, Log.DEBUG)
 
