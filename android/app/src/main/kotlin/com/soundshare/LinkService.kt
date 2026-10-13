@@ -341,8 +341,11 @@ class LinkService : Service() {
         fun latencyEstimate(): LatencyEstimate.Value {
             val now = System.nanoTime()
             val pc = pcLatency?.takeIf { now - it.received < 3_000_000_000L }?.value
-            val rtt = transport?.takeIf { now - it.received < 3_000_000_000L && playerStats?.transportName != "aoa" }?.milliseconds
             val player = playerStats?.takeIf { now - it.measuredAtNs < 1_500_000_000L }
+            // El PING de CONTROL va por adb y no representa a AOA. Por AOA el bloque cruza el USB en
+            // menos de 1 ms y sus irregularidades ya están en la cola medida del teléfono.
+            val rtt = if (player?.transportName == "aoa") 0.0
+                else transport?.takeIf { now - it.received < 3_000_000_000L }?.milliseconds
             return LatencyEstimate.calculate(mode, pc, player?.queuedMs?.toDouble(),
                 player?.takeIf { it.outputLatencyFrames >= 0 }?.outputLatencyMs?.toDouble(),
                 player?.socketMs?.toDouble() ?: 0.0, rtt)

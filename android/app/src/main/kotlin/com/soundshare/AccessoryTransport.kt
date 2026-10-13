@@ -17,7 +17,9 @@ import java.util.concurrent.atomic.AtomicInteger
 /** Descriptor persistente por cable; los modos abren sesiones lógicas, no lectores USB nuevos. */
 class AccessoryTransport(private val context: Context, private val onReady: () -> Unit) {
     private val usb = context.getSystemService(UsbManager::class.java)
-    private var requested: UsbAccessory? = null
+    // Un pedido de permiso por conexión del cable. No comparamos UsbAccessory: su equals() lee el
+    // número de serie, y sin permiso eso lanza SecurityException.
+    private var requested = false
     @Volatile private var descriptor: ParcelFileDescriptor? = null
     @Volatile private var output: OutputStream? = null
     @Volatile private var current: Session? = null
@@ -31,7 +33,7 @@ class AccessoryTransport(private val context: Context, private val onReady: () -
                 PERMISSION -> if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED,false)) {
                     prepare(); onReady()
                 } else Log.i(TAG,"permiso AOA rechazado; PLAYER sigue por adb")
-                UsbManager.ACTION_USB_ACCESSORY_DETACHED -> { release(); requested = null; failed = false }
+                UsbManager.ACTION_USB_ACCESSORY_DETACHED -> { release(); requested = false; failed = false }
             }
         }
     }
@@ -45,8 +47,8 @@ class AccessoryTransport(private val context: Context, private val onReady: () -
         if (closed || failed || descriptor != null) return
         val accessory = usb.accessoryList?.firstOrNull { it.manufacturer == "SoundShare" && it.model == "SoundShare" && it.version == "1" } ?: return
         if (!usb.hasPermission(accessory)) {
-            if (requested != accessory) {
-                requested = accessory
+            if (!requested) {
+                requested = true
                 // El sistema rellena los extras del resultado. Intent explícito, sólo para esta app.
                 val permission = PendingIntent.getBroadcast(context,0,Intent(PERMISSION).setPackage(context.packageName),
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)

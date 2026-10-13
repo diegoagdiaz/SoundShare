@@ -249,6 +249,27 @@ impl Hub {
         st.aoa = link;
     }
 
+    /// Si la app cerró su lado del accesorio (se reinició o se reinstaló), el cable sigue en modo
+    /// AOA: reabrimos la interfaz sin conmutar para que PLAYER no se quede en adb.
+    fn reopen_aoa(self: &Arc<Self>) {
+        let serial = {
+            let mut st = self.st.lock().unwrap();
+            if !st.aoa.as_ref().is_some_and(|a| !a.alive()) { return; }
+            let Some(serial) = st.device.as_ref().map(|d| d.serial.clone()) else { return };
+            // Soltar la interfaz reclamada antes de volver a abrirla.
+            st.aoa = None;
+            serial
+        };
+        match crate::aoa::reopen(&serial) {
+            Ok(link) => {
+                println!("  AOA: la app volvió a conectarse; accesorio reabierto.");
+                self.set_aoa(Some(link.clone()));
+                link.run(Arc::downgrade(self));
+            }
+            Err(e) => eprintln!("⚠ No pude reabrir AOA: {e}. PLAYER por adb."),
+        }
+    }
+
     pub fn device_changed(self: &Arc<Self>, device: Option<Device>) {
         let mut st = self.st.lock().unwrap();
         if st.shutting_down { return; }
@@ -285,6 +306,7 @@ impl Hub {
         let id = self.id();
         let Ok(writer) = sock.try_clone() else { return };
         let _ = writer.set_write_timeout(Some(Duration::from_secs(1)));
+        self.reopen_aoa();
         {
             let mut st = self.st.lock().unwrap();
             if st.shutting_down { return; }
