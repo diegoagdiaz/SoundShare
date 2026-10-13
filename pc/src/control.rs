@@ -67,10 +67,15 @@ impl RateLoop {
         let filtered = b;
 
         let error = filtered - target;
-        self.integral += error * dt;
-        // Anti-windup: el integrador solo puede pedir hasta la corrección máxima.
+        // Anti-windup: mientras la corrección está al tope y el error empuja hacia ese mismo
+        // lado, el integrador no acumula. Si no, al drenar una cola grande (el arranque) se
+        // carga entero y, al llegar al objetivo, sigue drenando hasta vaciar la cola.
         let lim = self.max_dev / self.ki;
-        self.integral = self.integral.clamp(-lim, lim);
+        let integral = (self.integral + error * dt).clamp(-lim, lim);
+        let out = self.kp * error + self.ki * integral;
+        if out.abs() <= self.max_dev || out.signum() != error.signum() {
+            self.integral = integral;
+        }
 
         (self.kp * error + self.ki * self.integral).clamp(-self.max_dev, self.max_dev)
     }
@@ -96,6 +101,27 @@ mod tests {
         assert!((level - target).abs() < 0.0005, "nivel final {level}");
         let dev = l.update(level, target, dt);
         assert!((dev - drift).abs() < 5e-6, "corrección final {dev}");
+    }
+
+    /// Como el A21s: el teléfono arranca con ~20 ms de cola de más. Mientras el lazo drena
+    /// a la corrección máxima, el integrador no debe cargarse; si se carga, al llegar al
+    /// objetivo sigue drenando y vacía la cola (medido: 8 ms por debajo, con cortes).
+    #[test]
+    fn drains_start_backlog_without_undershoot() {
+        let drift = 80e-6;
+        let target = 0.015;
+        let dt = 0.010;
+        let mut l = RateLoop::new(0.01, 1000.0, 3.0);
+        let mut level: f64 = target + 0.020;
+        let mut lowest = f64::MAX;
+        for _ in 0..(300.0 / dt) as usize {
+            let dev = l.update(level, target, dt);
+            level += (drift - dev) * dt;
+            lowest = lowest.min(level);
+        }
+        eprintln!("mínimo {:.2} ms bajo el objetivo", (target - lowest) * 1000.0);
+        assert!(target - lowest < 0.002, "la cola bajó {:.2} ms del objetivo", (target - lowest) * 1000.0);
+        assert!((level - target).abs() < 0.0005, "nivel final {level}");
     }
 }
 
