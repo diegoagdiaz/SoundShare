@@ -147,7 +147,9 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
         if (!run.attachPlayback(playback)) { track.release(); return }
         try {
             val capacity = track.bufferCapacityInFrames
-            val fast = track.performanceMode == AudioTrack.PERFORMANCE_MODE_LOW_LATENCY
+            // Puede cambiar en vivo: si la salida cambia (p. ej. se desconecta el Bluetooth),
+            // Android recrea la pista por dentro y vuelve a pedirla rápida.
+            var fast = track.performanceMode == AudioTrack.PERFORMANCE_MODE_LOW_LATENCY
             // Arrancamos donde terminó la última sesión: el jitter del USB depende del teléfono y la PC.
             val prefs = context.getSharedPreferences("player", Context.MODE_PRIVATE)
             val learnedKey = if (transport == "adb") "target_ms_${fmt.sampleRate}" else "target_ms_aoa_${fmt.sampleRate}"
@@ -295,6 +297,13 @@ class Player(private val context: Context, private val accessory: AccessoryTrans
 
                 if (now - lastUi > UI_PERIOD_NS) {
                     lastUi = now
+                    val nowFast = track.performanceMode == AudioTrack.PERFORMANCE_MODE_LOW_LATENCY
+                    if (nowFast != fast) {
+                        fast = nowFast
+                        Log.i(TAG, "la salida cambió: rápida=$fast")
+                        // La pista recreada puede no conservar el tamaño de buffer que fijamos.
+                        applyTarget()
+                    }
                     run.ifActive { onStats(Stats(fmt.sampleRate, target.frames, queued, outputLatency, underruns, fast, inSocket, transportName = transport)) }
                 }
             }

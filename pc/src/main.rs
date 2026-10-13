@@ -29,8 +29,8 @@ use engine::Engine;
 use hub::Hub;
 use protocol::{Mode, PORT};
 
-const REQUIRED_APP_VERSION_CODE: u32 = 4;
-const REQUIRED_APP_VERSION_NAME: &str = "0.3.0";
+const REQUIRED_APP_VERSION_CODE: u32 = 5;
+const REQUIRED_APP_VERSION_NAME: &str = "0.3.1";
 
 struct Args {
     serial: Option<String>,
