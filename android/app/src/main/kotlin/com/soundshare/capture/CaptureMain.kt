@@ -28,7 +28,7 @@ object CaptureMain {
     private const val RATE = 48000
     private const val CHANNELS = 2
     private const val FRAME_BYTES = CHANNELS * 2
-    private const val CHUNK_FRAMES = 240
+    private const val CHUNK_FRAMES = 1024
 
     @Volatile private var stopped = false
 
@@ -97,12 +97,19 @@ object CaptureMain {
 
     private fun pump(rec: AudioRecord, out: java.io.OutputStream, debug: Boolean) {
         val chunk = ByteArray(CHUNK_FRAMES * FRAME_BYTES)
+        // REMOTE_SUBMIX suele entregar 1024 frames juntos. Pedir siempre 240 bloqueantes
+        // retiene el resto hasta la siguiente entrega; esperamos solo un frame y drenamos
+        // lo que ya llegó. La capacidad limita cada escritura, sin agregar espera.
+        val reader = PcmReader(FRAME_BYTES) { into, offset, size, blocking ->
+            rec.read(into, offset, size,
+                if (blocking) AudioRecord.READ_BLOCKING else AudioRecord.READ_NON_BLOCKING)
+        }
         var reads = 0
         var maxGapNs = 0L
         var last = System.nanoTime()
         var window = last
         while (!stopped) {
-            val n = rec.read(chunk, 0, chunk.size)
+            val n = reader.readInto(chunk)
             if (n < 0) {
                 if (stopped) break
                 throw IOException("AudioRecord.read = $n")

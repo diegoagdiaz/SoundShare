@@ -6,6 +6,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTimestamp
 import android.media.AudioTrack
+import android.os.Build
 import android.os.Process
 import android.os.SystemClock
 import android.util.Log
@@ -121,7 +122,12 @@ class Player(private val context: Context, private val onStats: (Stats) -> Unit)
         val target = QueueTarget(burst, fmt.sampleRate, capacity / 2, (initialMs * fmt.sampleRate / 1000).toInt())
         fun applyTarget() {
             // El umbral de escritura queda por encima del objetivo: write() casi nunca bloquea.
-            track.bufferSizeInFrames = (target.frames + 2 * burst).coerceAtMost(capacity)
+            val bufferFrames = track.setBufferSizeInFrames((target.frames + 2 * burst).coerceAtMost(capacity))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                // Arrancar al reunir el objetivo, sin esperar también el margen de escritura.
+                val actualBufferFrames = if (bufferFrames > 0) bufferFrames else track.bufferSizeInFrames
+                track.setStartThresholdInFrames(minOf(target.frames, actualBufferFrames).coerceAtLeast(1))
+            }
         }
         applyTarget()
         Log.i(TAG, "pista: ${fmt.sampleRate} Hz, burst $burst, capacidad $capacity, rápida=$fast, objetivo ${target.frames}")

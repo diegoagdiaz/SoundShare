@@ -113,6 +113,8 @@ App / Player                        PC / Hub + PipeWire
 
 El sink virtual pide 256 frames (5,3 ms a 48 kHz), usa `node.always-process` y entrega los datos a un ring; otro hilo los manda por TCP. Android solicita AudioTrack de baja latencia y conserva el sufijo de cada escritura parcial hasta entregarlo completo. Su objetivo cubre el peor hueco reciente del túnel más un burst, con mínimo de dos bursts, una ventana de 30 s y límite de media capacidad de la pista. Sube enseguida, baja un burst cada 20 s y agrega un piso ante cortes que decae un burst cada 30 s. Ignora huecos/cortes iniciales para ese aprendizaje durante 700 ms tras iniciar la reproducción. El objetivo final se persiste en SharedPreferences por frecuencia de muestreo; un teléfono nuevo arranca con 30 ms.
 
+El buffer de escritura se ajusta a objetivo + dos bursts, limitado por la capacidad de la pista. En Android 12+ se fija además el umbral de inicio en el objetivo, limitado por el tamaño efectivo devuelto por AudioTrack, para evitar esperar también el margen de escritura. En Android 8–11 se conserva el umbral del sistema. Los descensos del objetivo y del piso respetan sus límites incluso cuando el valor aprendido no es múltiplo de un burst.
+
 Si la cola supera `objetivo + max(objetivo, 50 ms)`, programa el descarte de `cola - objetivo` frames entrantes. No vacía de inmediato AudioTrack: omite las siguientes muestras recibidas hasta consumir ese exceso.
 
 ## CAPTURE: Móvil → PC
@@ -141,7 +143,9 @@ REMOTE_SUBMIX captura la mezcla de medios y desvía su salida del parlante. Si A
 
 La PC reproduce con el stream `SoundShare (Móvil)`. `-o/--output SALIDA` o `SOUNDSHARE_OUTPUT` eligen su `node.name`; sin ambos usa la salida por defecto, y una salida explícita no tiene fallback. `SOUNDSHARE_DUMP=archivo` vuelca el PCM recibido antes del resampler, sin cabecera ni modificación del protocolo.
 
-El objetivo promedio inicial del ring es 26 ms. Arranca cuando reúne objetivo + medio «serrucho» de los bloques recibidos: la amplitud se estima inicialmente en 21 ms, se mide en ventanas de 1 s, se suaviza y se acota a 5–60 ms. El arranque descarta el exceso hasta ese nivel y prepara el filtro del lazo en el objetivo con `RateLoop::prime()`. Cada underrun rellena con silencio, aumenta el objetivo 4 ms (máximo 120 ms) y espera volver a llenar. Ese objetivo no baja durante la sesión. Si el ring supera objetivo + serrucho + 100 ms, descarta hasta el punto de arranque y vuelve a preparar el filtro.
+El capturador espera un frame completo con `READ_BLOCKING` y drena los frames ya disponibles con `READ_NON_BLOCKING`, hasta 1024 frames por escritura TCP. No espera a completar ese máximo ni retiene el resto parcial de un bloque del submix hasta su siguiente entrega. Si la lectura no bloqueante falla después de leer el primer frame, envía lo leído y reporta el error en la siguiente iteración.
+
+El objetivo promedio inicial del ring es 26 ms. Arranca cuando reúne objetivo + medio «serrucho» de los bloques recibidos: la amplitud se estima inicialmente en 21 ms, se mide en ventanas de 1 s, se suaviza y se acota a 5–60 ms. El arranque descarta el exceso hasta ese nivel y prepara el filtro del lazo en el objetivo con `RateLoop::prime()`. Cada underrun rellena con silencio, aumenta el objetivo 4 ms (máximo 120 ms) y espera volver a llenar. `SourceTarget` baja 4 ms hacia el mínimo de 26 ms tras 60 s de ciclos completos con una cola restante de al menos 4 ms más otro ciclo. Cuenta frames reproducidos según la frecuencia del formato; no cuenta el llenado. Los cortes, la falta de margen y los descartes por acumulación reinician el período estable. La recuperación reduce solo el objetivo: el PI drena el exceso gradualmente, sin saltar muestras. Si el ring supera objetivo + serrucho + 100 ms, descarta hasta el punto de arranque, vuelve a preparar el filtro y reinicia la espera de recuperación.
 
 ## Compatibilidad
 

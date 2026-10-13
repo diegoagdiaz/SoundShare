@@ -51,7 +51,7 @@ class QueueTarget(private val burst: Int, sampleRate: Int, private val maxFrames
             bucketStart = now
         }
         if (floor > minFrames && now - lastUnderrun > FLOOR_DECAY_NS) {
-            floor -= burst
+            floor = maxOf(minFrames, floor - burst)
             lastUnderrun = now
         }
         return update(now)
@@ -64,7 +64,7 @@ class QueueTarget(private val burst: Int, sampleRate: Int, private val maxFrames
             .coerceAtMost(maxFrames)
         val next = when {
             wanted > frames -> wanted
-            wanted < frames && now - lastChange > STEP_DOWN_NS -> frames - burst
+            wanted < frames && now - lastChange > STEP_DOWN_NS -> maxOf(wanted, frames - burst)
             else -> frames
         }
         if (next == frames) return false
