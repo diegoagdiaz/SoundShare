@@ -49,5 +49,7 @@ fi
 archive="$root/dist/SoundShare-${os_id}${os_version}-$(uname -m).tar.gz"
 tar -czf "$archive" -C "$staging" SoundShare
 cp -- "$apk" "$root/dist/SoundShare.apk"
+# La copia versionada en la raíz es la que instala ./soundshare desde el repo.
+cp -- "$apk" "$root/SoundShare.apk"
 "$root/scripts/checksums.sh"
 printf 'Paquete PC + Android: %s\nAPK para instalar en el teléfono: %s/dist/SoundShare.apk\n' "$archive" "$root"

@@ -195,7 +195,6 @@ fn watch_devices(hub: Arc<Hub>, adb: Adb, serial: Option<String>, port: u16, sta
     let mut warned = String::new();
     let mut start_mode = start_mode;
     let mut attempted: Option<String> = None;
-    let mut app_checked: Option<String> = None;
     let mut refresh_reverse = false;
     loop {
         let found = match pick_device(&adb, serial.as_deref()) {
@@ -228,7 +227,6 @@ fn watch_devices(hub: Arc<Hub>, adb: Adb, serial: Option<String>, port: u16, sta
         }
         if ready.is_none() && current.is_none() && attempted.is_some() {
             attempted = None;
-            app_checked = None;
             hub.set_aoa(None);
         }
 
@@ -236,8 +234,11 @@ fn watch_devices(hub: Arc<Hub>, adb: Adb, serial: Option<String>, port: u16, sta
             match &ready {
                 Some(d) => {
                     // Una sola conmutación por conexión de cable, antes de reverse/CONTROL/CAPTURE.
+                    let mut checked = None;
                     if attempted.as_deref() != Some(&d.serial) {
                         attempted = Some(d.serial.clone());
+                        // Instalar antes de AOA: sin una app que atienda el accesorio, Android muestra la URI.
+                        checked = Some(prepare_app(&adb, &d.serial));
                         if std::env::var("SOUNDSHARE_PLAYER_TRANSPORT").as_deref() != Ok("adb") {
                             match aoa::prepare(&d.serial) {
                                 Ok(link) => { hub.set_aoa(Some(link.clone())); link.run(Arc::downgrade(&hub)); }
@@ -259,12 +260,7 @@ fn watch_devices(hub: Arc<Hub>, adb: Adb, serial: Option<String>, port: u16, sta
                             warned.clear();
                             hub.device_changed(ready.clone());
                             // Rehacer reverse tras AOA no habilita otro intento de instalación.
-                            let app_ready = if app_checked.as_deref() != Some(&d.serial) {
-                                app_checked = Some(d.serial.clone());
-                                prepare_app(&adb, &d.serial)
-                            } else {
-                                adb.package_path(&d.serial).map(|p| p.is_some())
-                            };
+                            let app_ready = checked.unwrap_or_else(|| adb.package_path(&d.serial).map(|p| p.is_some()));
                             match app_ready {
                                 Ok(true) => {
                                     println!("  Abriendo SoundShare: elegí el sentido del audio en el teléfono (o acá: 1 / 2).");
@@ -286,8 +282,7 @@ fn watch_devices(hub: Arc<Hub>, adb: Adb, serial: Option<String>, port: u16, sta
                     println!("○ Teléfono desconectado");
                     current = None;
                     attempted = None;
-                    app_checked = None;
-                    hub.set_aoa(None);
+                            hub.set_aoa(None);
                     hub.device_changed(None);
                 }
             }

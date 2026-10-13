@@ -23,6 +23,8 @@ Thumbs.db
 
 # Resultados y claves locales.
 *.apk
+# APK versionada para que ./soundshare la instale sin compilar Android.
+!/SoundShare.apk
 *.aab
 *.jks
 *.keystore
