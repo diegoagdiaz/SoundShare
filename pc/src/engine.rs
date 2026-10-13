@@ -32,8 +32,11 @@ const CONFIGURED_SINK: &str = "default.configured.audio.sink";
 /// Lo que mandamos al teléfono: el formato interno de PipeWire, sin pérdidas.
 pub const SINK_FORMAT: Format = Format { rate: 48_000, channels: 2, sample: Sample::F32LE };
 
-/// Cuántum pedido al grafo: 256 frames = 5,3 ms a 48 kHz.
+/// Cuántum pedido al grafo de Móvil → PC: 256 frames = 5,3 ms a 48 kHz.
 const QUANTUM: u32 = 256;
+/// PC → Móvil pide la mitad: el sink no comparte grafo con la placa de la laptop, y bloques
+/// más chicos bajan la latencia de la PC y el serrucho de la cola del teléfono (2,7 ms cada uno).
+const SINK_QUANTUM: u32 = 128;
 /// Calidad del resampler adaptativo (0-14). Solo actúa para las correcciones de reloj.
 const RESAMPLE_QUALITY: &str = "10";
 
@@ -463,7 +466,7 @@ fn create_sink(core: &pw::core::CoreRc, shared: Arc<SinkShared>, errors: &mpsc::
         *pw::keys::NODE_NAME => SINK_NAME,
         *pw::keys::NODE_DESCRIPTION => "SoundShare → Móvil",
         *pw::keys::APP_NAME => "SoundShare",
-        *pw::keys::NODE_LATENCY => format!("{QUANTUM}/{}", SINK_FORMAT.rate),
+        *pw::keys::NODE_LATENCY => format!("{SINK_QUANTUM}/{}", SINK_FORMAT.rate),
         // Siempre en marcha, aunque no suene nada: así la latencia no cambia nunca
         // y el teléfono no entra y sale de reposo (sin "clics").
         *pw::keys::NODE_ALWAYS_PROCESS => "true",
